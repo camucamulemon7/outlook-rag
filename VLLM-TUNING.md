@@ -41,7 +41,36 @@ These experiments were not applied as part of the measurements above. Reducing `
 
 On 251 emails, enhanced cleanup reduced embedding input from 1,656,336 to 775,417 characters (about 53%) and chunks from 1,207 to 591 (about 51%). In a separate 40-email comparison, indexing time dropped from 22.60 to 11.01 seconds. These are small local samples and may be affected by caching and load.
 
-The current server truncates the API's 4096-dimensional response to 1024 dimensions and renormalizes it. This reduces local vector storage and search work, but does not reduce GPU inference or API response size. Requesting 1024 dimensions directly from vLLM would require separate API compatibility checks.
+Before v0.6.0, the server truncated the API's 4096-dimensional response locally. It now requests 1024 dimensions for Qwen3-Embedding when the route supports it, with a fallback to the original behavior.
+
+## Enabling reduced API responses
+
+For a LiteLLM route using the OpenAI provider, allow the dimensions parameter for this model:
+
+```yaml
+model_list:
+  - model_name: Qwen/Qwen3-Embedding-8B
+    litellm_params:
+      model: openai/Qwen/Qwen3-Embedding-8B
+      api_base: http://172.17.0.1:8006/v1
+      allowed_openai_params: ["dimensions"]
+```
+
+Preserve the other model settings and credentials. Restart the proxy to load the updated configuration.
+
+If vLLM reports that Qwen3-Embedding does not support Matryoshka embeddings, add this startup argument, as in the Qwen project's vLLM example:
+
+```text
+--hf-overrides '{"is_matryoshka":true}'
+```
+
+This marks the model as MRL-capable; it does not change the weights. Keep the default API output at 4096 dimensions and request 1024 per call. A global 1024 output default would change native dimension detection and existing index identity.
+
+In the tested Open WebUI -> LiteLLM -> vLLM route, both changes were required. Eight real-mail chunks totaling 10,451 characters produced about 703 KB at 4096 dimensions and 174 KB at 1024 dimensions (about 75% less response data). After warmup, repeated identical-input requests had medians of 210 ms and 113 ms respectively. This is a small repeated-input experiment, not an estimate of full indexing speed.
+
+The minimum cosine similarity between the API's reduced vectors and renormalized prefixes of its full vectors was above 0.999999999999999. A 28-query known-target evaluation across 12 real-mail topics, including date-filter cases, produced identical aggregate ranking metrics with both response modes: 18/28 at rank 1, 22/28 in the top 5, and MRR@10 of 0.7176. The labels are not exhaustive relevance judgments.
+
+Shorter responses reduce transfer and JSON processing; they do not remove the model's main forward-pass computation. Existing 1024-dimensional indexes can be retained when the reduced vectors match the previous normalized prefixes.
 
 ## References
 

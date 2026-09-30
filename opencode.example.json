@@ -3,7 +3,7 @@
     "servers": {
       "outlook_rag": {
         "type": "local",
-        "command": ["uvx", "--python", "3.12", "--from", "git+https://github.com/camucamulemon7/outlook-rag.git@v0.5.0", "outlook-rag"],
+        "command": ["uvx", "--python", "3.12", "--from", "git+https://github.com/camucamulemon7/outlook-rag.git@v0.6.0", "outlook-rag"],
         "environment": {
           "OUTLOOK_RAG_MODEL": "Qwen/Qwen3-Embedding-8B",
           "OUTLOOK_RAG_API_KEY": "YOUR_API_KEY"

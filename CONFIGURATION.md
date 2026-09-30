@@ -28,8 +28,17 @@ Set `OUTLOOK_RAG_EMBEDDING_URL` if your endpoint differs from the default. As an
 | OUTLOOK_RAG_EMBEDDING_CONCURRENT_REQUESTS | Up to 2 requests |
 | OUTLOOK_RAG_EMBEDDING_MAX_BATCH_CHARS | 24000 characters |
 | OUTLOOK_RAG_SYNC_BATCH_EMAILS | Save batches of 16 emails |
-| OUTLOOK_RAG_SYNC_MAX_EMAILS | Up to 200 changed emails per folder per call |
-| OUTLOOK_RAG_SYNC_MAX_TOTAL_EMAILS | Up to 200 changed emails across the entire call |
+| OUTLOOK_RAG_SYNC_MAX_EMAILS | Up to 200 mail attempts per folder per call |
+| OUTLOOK_RAG_SYNC_MAX_TOTAL_EMAILS | Up to 200 mail attempts across the entire call |
+| OUTLOOK_RAG_SYNC_MAX_SECONDS | 30-second cooperative budget; in-flight calls may overrun |
+| OUTLOOK_RAG_SYNC_MAX_SCANNED | 2000 new metadata rows, including unchanged/non-mail rows; cursor overlap is skipped separately |
+| OUTLOOK_RAG_SYNC_RETRY_LIMIT | Retry up to 10 due failures per call, within the overall mail/time budget |
+| OUTLOOK_RAG_QUERY_CACHE_SIZE | 256 query embeddings, evicted by least recent use; 0 disables caching |
+| OUTLOOK_RAG_EMBEDDING_REQUEST_DIMENSIONS | Qwen3-Embedding: stored dimensions. Other models: unset. 0 disables server-side reduction |
+| OUTLOOK_RAG_SEARCH_CANDIDATES | At least 100 candidates per search source (also at least 10 times the result limit) |
+| OUTLOOK_RAG_RRF_K | 60 |
+| OUTLOOK_RAG_SEMANTIC_WEIGHT | 1.0 |
+| OUTLOOK_RAG_LEXICAL_WEIGHT | 1.0 |
 | OUTLOOK_RAG_CHUNK_SIZE | 1600 characters |
 | OUTLOOK_RAG_CHUNK_OVERLAP | 200 characters |
 | OUTLOOK_RAG_TEXT_CLEANING_VERSION | 2: enhanced text cleanup |
@@ -42,7 +51,19 @@ Set `OUTLOOK_RAG_EMBEDDING_URL` if your endpoint differs from the default. As an
 
 `OUTLOOK_RAG_FOLDERS` and `OUTLOOK_RAG_EXCLUDED_FOLDERS` accept JSON array strings. For example, set `OUTLOOK_RAG_EXCLUDED_FOLDERS` to `["*/Advertisements","*/RSS Feeds"]`. Exclusions support wildcard paths. Search folders are always excluded from automatic discovery to avoid duplicate indexing.
 
-Startup does not perform full indexing or schedule synchronization. Call `sync_emails` to update the database. For a small batch, pass `{"max_total_emails": 10}`. Repeat until folder windows are complete and no folders remain pending.
+Startup does not perform full indexing or schedule synchronization. Call `sync_emails` to update the database. For a small batch, pass `{"max_total_emails": 10, "max_seconds": 5, "max_scanned": 100}`. Repeat until folder windows are complete and no folders remain pending. Folders rotate between calls so large folders do not starve smaller ones.
+
+Mail attempts include retries and failed reads, not just successful updates. Metadata uses Outlook GetTable/GetArray where available; unsupported providers fall back to Items. Checkpoints are saved after successful batches. Incremental filters and reconciliation progress survive bounded calls.
+
+GetTable short-term EntryIDs are mapped to canonical MailItem IDs before indexing. Aliases are scoped to the Outlook profile and process lifetime; if that identity cannot be verified, mappings are resolved again. Existing databases retain their mail IDs. Reconciliation skips deletion when any mail ID could not be resolved during the scan.
+
+Unreadable mail and permanent input errors are retained for retry with increasing backoff. Provider/network outages stop the current call without advancing over uncommitted input. `index_status` exposes the failed-mail count; a completed scan can still have failures awaiting retry.
+
+`maintain_index` prunes unused document embedding caches, enforces the query cache limit, and compacts vector storage while retaining versions for seven days. It does not delete mail or current chunks.
+
+Server-side dimension requests do not change index identity: full output is still detected as the model's native dimension, and stored dimensions remain fixed. Unsupported dimension requests fall back once per process. Only request reduced dimensions from models that support MRL.
+
+Candidate count and RRF weights affect ranking only and do not require re-indexing. Use a labeled query set to compare changes before selecting new defaults.
 
 ## Archives and file locations
 
