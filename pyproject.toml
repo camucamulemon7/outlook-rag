@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "outlook-rag"
+version = "0.5.0"
+description = "Local Outlook semantic and keyword search through MCP and an OpenAI-compatible embedding API"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = ["mcp>=1.20,<2", "httpx>=0.28,<1", "lancedb>=0.25,<1", "filelock>=3.20,<4", "pywin32>=310; sys_platform == 'win32'", "sudachipy>=0.6,<1", "sudachidict-core"]
+
+[project.scripts]
+outlook-rag = "outlook_rag.app:main"
+
+[project.urls]
+Repository = "https://github.com/camucamulemon7/outlook-rag"
+Issues = "https://github.com/camucamulemon7/outlook-rag/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/outlook_rag"]

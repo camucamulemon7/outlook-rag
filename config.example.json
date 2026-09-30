@@ -1,0 +1,19 @@
+{
+  "embedding_url": "http://localhost:8080/api/v1/embeddings",
+  "model": "Qwen/Qwen3-Embedding-8B",
+  "dimensions": 4096,
+  "api_key_env": "OUTLOOK_RAG_API_KEY",
+  "key_file": "./api-key.dpapi",
+  "data_dir": "./data",
+  "folders": "auto",
+  "embedding_batch_size": 8,
+  "embedding_max_batch_chars": 24000,
+  "sync_batch_emails": 16,
+  "sync_max_emails": 200,
+  "sync_max_total_emails": 200,
+  "since_days": 0,
+  "warmup_on_start": true,
+  "embedding_concurrent_requests": 2,
+  "storage_dimensions": 1024,
+  "text_cleaning_version": 2
+}
