@@ -185,7 +185,7 @@ class ConfigTests(unittest.TestCase):
         app._DIMENSIONS.clear()
         transport = httpx.MockTransport(lambda request: httpx.Response(200,json={"data":[{"index":0,"embedding":[1.0]*16}]}))
         actual_client = httpx.Client
-        with patch.dict(os.environ, {"OUTLOOK_RAG_MODEL":"fixture-auto", "OUTLOOK_RAG_API_KEY":"fixture", "LOCALAPPDATA":str(Path('work').resolve())},clear=True):
+        with patch.dict(os.environ, {"OUTLOOK_RAG_MODEL":"fixture-auto", "OUTLOOK_RAG_API_KEY":"fixture", "USERPROFILE":str(Path('work/profile').resolve()), "LOCALAPPDATA":str(Path('work').resolve())},clear=True):
             with patch.object(app.httpx,"Client",side_effect=lambda **kwargs:actual_client(transport=transport,**kwargs)) as clients:
                 cfg=app.config()
                 app.config()
@@ -196,6 +196,29 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg["since_days"],0)
         self.assertEqual(cfg["embedding_batch_size"],8)
         self.assertEqual(cfg["embedding_concurrent_requests"],2)
+    def test_default_database_location_and_legacy_compatibility(self):
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root) / "profile"
+            local = Path(root) / "local"
+            env = dict(LOCALAPPDATA=str(local), OUTLOOK_RAG_MODEL="fixture-path",
+                       OUTLOOK_RAG_DIMENSIONS="16")
+            with patch.dict(os.environ, env, clear=True), patch.object(Path, "home", return_value=home):
+                cfg = app.config()
+                preferred = Path(cfg["data_dir"])
+                self.assertEqual(preferred.parent, home / "Documents" / "Outlook\u30d5\u30a1\u30a4\u30eb" / "outlook-rag")
+                self.assertEqual(Path(cfg["key_file"]), local / "outlook-rag" / "api-key.dpapi")
+                legacy = local / "outlook-rag" / hashlib.sha256(app.index_identity(cfg).encode()).hexdigest()[:12]
+                legacy.mkdir(parents=True)
+                self.assertEqual(Path(app.config()["data_dir"]), preferred)
+                (legacy / "metadata.sqlite").touch()
+                self.assertEqual(Path(app.config()["data_dir"]), legacy)
+                preferred.mkdir(parents=True)
+                (preferred / "metadata.sqlite").touch()
+                self.assertEqual(Path(app.config()["data_dir"]), preferred)
+                explicit = Path(root) / "custom"
+                with patch.dict(os.environ, {"OUTLOOK_RAG_DATA_DIR": str(explicit)}):
+                    self.assertEqual(Path(app.config()["data_dir"]), explicit)
+
     def test_mcp_environment_without_configuration_file(self):
         env = dict(LOCALAPPDATA=str(Path('work').resolve()), OUTLOOK_RAG_EMBEDDING_URL="http://fixture.invalid", OUTLOOK_RAG_MODEL="generic",
                    OUTLOOK_RAG_DIMENSIONS="768", OUTLOOK_RAG_DATA_DIR="./fixture-data",

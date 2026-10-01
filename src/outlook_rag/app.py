@@ -108,8 +108,11 @@ def config(*, resolve_dimensions: bool = True) -> dict:
         raise ValueError("Set OUTLOOK_RAG_MODEL to your embedding model ID.")
     cfg.setdefault("embedding_url", "http://localhost:8080/api/v1/embeddings")
     automatic_data_dir = not cfg.get("data_dir")
+    cfg["_automatic_data_dir"] = automatic_data_dir
     local_root = Path(os.environ["LOCALAPPDATA"]) if os.environ.get("LOCALAPPDATA") else Path.home() / "AppData" / "Local"
-    cfg.setdefault("data_dir", str(local_root / "outlook-rag" / "pending"))
+    if automatic_data_dir:
+        index_root = Path.home() / "Documents" / "Outlook\u30d5\u30a1\u30a4\u30eb" / "outlook-rag"
+        cfg["data_dir"] = str(index_root / "pending")
     cfg.setdefault("key_file", str(local_root / "outlook-rag" / "api-key.dpapi"))
     cfg.setdefault("folders", "auto")
     cfg.setdefault("since_days", 0)
@@ -173,7 +176,14 @@ def config(*, resolve_dimensions: bool = True) -> dict:
         raise ValueError("embedding_max_batch_chars must be 1600..262144")
     if automatic_data_dir:
         digest = hashlib.sha256(index_identity(cfg).encode()).hexdigest()[:12]
-        cfg["data_dir"] = str(local_root / "outlook-rag" / digest)
+        model_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", cfg["model"]).strip(" .")[:80].rstrip(" .") or "model"
+        if model_name.split(".")[0].upper() in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}:
+            model_name = "model_" + model_name
+        stored_dimensions = vector_dimensions(cfg) if cfg.get("dimensions") else "auto"
+        preferred = index_root / f"{model_name}-{stored_dimensions}d-{digest}"
+        # Prefer a readable name for new indexes; never move an active database.
+        previous = [preferred, index_root / digest, local_root / "outlook-rag" / digest]
+        cfg["data_dir"] = str(next((folder for folder in previous if (folder / "metadata.sqlite").is_file()), preferred))
     return cfg
 
 
@@ -394,6 +404,11 @@ def open_store(cfg: dict):
     CREATE TABLE IF NOT EXISTS entry_aliases (session TEXT, store_id TEXT, short_id TEXT, received TEXT,
       canonical_id TEXT, last_used REAL, PRIMARY KEY(session,store_id,short_id,received));
     """)
+    # Keep the original failure schema compatible with older background workers.
+    sql.execute("CREATE TABLE IF NOT EXISTS sync_failure_details (mail_id TEXT PRIMARY KEY,error_detail TEXT,last_failed REAL)")
+    sql.execute("""CREATE TRIGGER IF NOT EXISTS remove_sync_failure_details AFTER DELETE ON sync_failures
+        BEGIN DELETE FROM sync_failure_details WHERE mail_id=OLD.mail_id; END""")
+    sql.execute("CREATE INDEX IF NOT EXISTS emails_conversation_order ON emails(store_id,conversation_id,received,id)")
     # Refuse a model/configuration mismatch rather than mixing embedding spaces.
     identity = index_identity(cfg)
     previous = sql.execute("SELECT value FROM state WHERE key='embedding_identity'").fetchone()
@@ -761,10 +776,16 @@ def record_sync_failure(sql, metadata, store_id, folder, exc):
     mail_id = hashlib.sha256(f"{store_id}:{metadata['entry_id']}".encode()).hexdigest()
     row = sql.execute("SELECT attempts FROM sync_failures WHERE mail_id=?", (mail_id,)).fetchone()
     attempts = (row[0] if row else 0) + 1
+    failed_at = time.time()
     with sql:
-        sql.execute("INSERT OR REPLACE INTO sync_failures VALUES (?,?,?,?,?,?,?,?,?)",
+        from .features import failure_reason
+        sql.execute("""INSERT OR REPLACE INTO sync_failures
+            (mail_id,entry_id,store_id,folder,modified,attempts,error_type,next_retry,last_failed)
+            VALUES (?,?,?,?,?,?,?,?,?)""",
             (mail_id, metadata["entry_id"], store_id, folder, metadata["modified"], attempts,
-             type(exc).__name__, time.time() + min(3600, 30 * 2 ** min(attempts - 1, 7)), time.time()))
+             type(exc).__name__, failed_at + min(3600, 30 * 2 ** min(attempts - 1, 7)), failed_at))
+        sql.execute("INSERT OR REPLACE INTO sync_failure_details VALUES (?,?,?)", (mail_id,failure_reason(exc),failed_at))
+
 
 
 def permanent_mail_error(exc):
@@ -812,6 +833,14 @@ def sync(folders: list[str] | None = None, max_emails: int | None = None, since_
                 discovery_errors = discovery["errors"]
             else:
                 targets = [(name, resolve_folder(namespace, name)) for name in selection]
+            if selection == "auto":
+                inventory = [dict(folder=info["path"], source_items_estimate=info["item_count"] if since_days == 0 else None)
+                             for store in discovery["stores"] for info in store["folders"] if info["included"]]
+            else:
+                inventory = [dict(folder=name, source_items_estimate=None) for name, _ in targets]
+            with sql:
+                sql.execute("INSERT OR REPLACE INTO state VALUES ('folder_inventory',?)",
+                            (json.dumps(dict(folders=inventory, since_days=since_days)),))
             rotation_key = "rotation:" + hashlib.sha256(json.dumps([selection, since_days, reconcile], sort_keys=True).encode()).hexdigest()
             rotation = sql.execute("SELECT value FROM state WHERE key=?", (rotation_key,)).fetchone()
             if rotation:
@@ -894,17 +923,28 @@ def sync(folders: list[str] | None = None, max_emails: int | None = None, since_
                 reconcile_uncertain = checkpoint.get("reconcile_uncertain", False) if continuing else False
                 complete, batch_stats, pending = True, {}, []
                 metadata_source = None
+                progress_started = time.perf_counter()
+                processed_base = checkpoint.get("processed_rows", 0) if continuing else 0
+                processing_base = checkpoint.get("processing_seconds", 0.0) if continuing else 0.0
+                progress_known = checkpoint.get("progress_known", "processed_rows" in checkpoint) if continuing and cursor else not cursor
+                advanced_rows = 0
+                source_count = safe_attr(safe_attr(folder, "Items", None), "Count", None)
+                source_count = source_count if type(source_count) is int and source_count >= 0 else None
 
                 def save_state(done=False):
                     value = dict(complete=done, watermark=scan_started if done else checkpoint.get("watermark"),
                         last_run=now.isoformat(), folder=folder_name, since_days=since_days,
                         scan_mode=mode, scan_started=scan_started, scan_from=scan_from,
-                        cursor_received=None if done else cursor, cursor_ids=[] if done else sorted(cursor_ids), reconcile_uncertain=reconcile_uncertain)
+                        cursor_received=None if done else cursor, cursor_ids=[] if done else sorted(cursor_ids), reconcile_uncertain=reconcile_uncertain,
+                        processed_rows=processed_base + advanced_rows, processing_seconds=processing_base + time.perf_counter() - progress_started,
+                        progress_known=progress_known, source_items_estimate=source_count if since_days == 0 and mode in ("backfill", "reconcile") else None,
+                        progress_updated_at=datetime.now().astimezone().isoformat())
                     with sql:
                         sql.execute("INSERT OR REPLACE INTO state VALUES (?,?)", (state_key, json.dumps(value)))
 
                 def advance(metadata):
-                    nonlocal cursor, cursor_ids
+                    nonlocal cursor, cursor_ids, advanced_rows
+                    advanced_rows += 1
                     if metadata["received"] != cursor:
                         cursor = metadata["received"]
                         cursor_ids = set()
@@ -1120,7 +1160,7 @@ def cached_query_vector(query: str, sql, cfg: dict):
 
 
 def search(query: str, limit: int = 10, folder: str | None = None, sender: str | None = None,
-           since: str | None = None, until: str | None = None, hybrid: bool = True) -> dict:
+           since: str | None = None, until: str | None = None, hybrid: bool = True, group_by_thread: bool = False) -> dict:
     if not query.strip() or len(query) > 4000 or not 1 <= limit <= 50:
         raise ValueError("Provide a nonempty query (max 4000 characters), limit 1..50.")
     started = time.perf_counter()
@@ -1173,22 +1213,28 @@ def search(query: str, limit: int = 10, folder: str | None = None, sender: str |
                         ORDER BY bm25(lexical) LIMIT ?""", [expression] + params + [candidate_count]).fetchall()
                     for rank, row in enumerate(lexical_rows, 1):
                         scores[row[0]] = scores.get(row[0], 0) + cfg.get("lexical_weight", 1.0) / (cfg.get("rrf_k", 60) + rank)
-            output, seen = [], set()
+            output, seen, threads = [], set(), set()
             for cid, score in sorted(scores.items(), key=lambda pair: pair[1], reverse=True):
                 row = sql.execute("""SELECT e.*, c.text AS snippet FROM chunks c JOIN emails e ON e.id=c.email_id WHERE c.id=?""", (cid,)).fetchone()
                 if not row or row["id"] in seen:
                     continue
                 seen.add(row["id"])
+                thread = (row["store_id"], row["conversation_id"] or row["id"])
+                if group_by_thread and thread in threads:
+                    continue
+                threads.add(thread)
                 output.append({"mail_id": row["id"], "entry_id": row["entry_id"], "store_id": row["store_id"],
                                "subject": row["subject"], "sender": row["sender"], "received": row["received"],
                                "folder": row["folder"], "conversation_id": row["conversation_id"],
                                "snippet": row["snippet"][:1800], "rank_score": round(score, 6),
                                "semantic_similarity": round(similarities[cid], 4) if cid in similarities else None})
+                if group_by_thread:
+                    output[-1]["thread_mail_count"] = sql.execute("SELECT count(*) FROM emails WHERE store_id=? AND conversation_id=?", (row["store_id"], row["conversation_id"])).fetchone()[0] if row["conversation_id"] else 1
                 if len(output) >= limit:
                     break
             return {"query": query, "count": len(output), "items": output, "embedding_ms": embedding_ms,
                     "elapsed_ms": round((time.perf_counter() - started) * 1000), "hybrid": hybrid, "query_cache_hit": query_cache_hit,
-                    "source": "local_index", "freshness": "As of last sync; run sync_emails to refresh."}
+                    "grouped_by_thread": group_by_thread, "source": "local_index", "freshness": "As of last sync; run sync_emails to refresh."}
         finally:
             sql.close()
 
@@ -1198,7 +1244,8 @@ def status() -> dict:
     with _LOCK:
         sql, table = open_store(cfg)
         try:
-            return {"model": cfg["model"], "dimensions": cfg["dimensions"],
+            from .features import folder_progress
+            return {"folder_progress": folder_progress(sql, cfg), "model": cfg["model"], "dimensions": cfg["dimensions"],
                     "storage_dimensions": vector_dimensions(cfg),
                     "text_cleaning_version": cfg["text_cleaning_version"],
                     "emails": sql.execute("SELECT count(*) FROM emails").fetchone()[0],
@@ -1290,9 +1337,9 @@ def warmup_embedding_api():
 
 @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
 def search_emails(query: str, limit: int = 10, folder: str | None = None, sender: str | None = None,
-                  since: str | None = None, until: str | None = None, hybrid: bool = True) -> dict:
-    """Fast semantic + Japanese BM25 search over indexed emails. since/until are inclusive YYYY-MM-DD bounds. Returns passages and original Outlook IDs."""
-    return search(query, limit, folder, sender, since, until, hybrid)
+                  since: str | None = None, until: str | None = None, hybrid: bool = True, group_by_thread: bool = False) -> dict:
+    """Fast semantic + Japanese BM25 search over indexed emails. since/until are inclusive YYYY-MM-DD bounds. Returns passages and original Outlook IDs. group_by_thread keeps the strongest match per store/conversation."""
+    return search(query, limit, folder, sender, since, until, hybrid, group_by_thread)
 
 @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
 def index_status() -> dict:
@@ -1337,7 +1384,11 @@ def start_sync_job(folders: list[str] | None = None, since_days: int | None = No
 def sync_job_status(job_id: str | None = None) -> dict:
     """Read durable bulk job progress, counters and current index coverage. Omit job_id for the latest job. Completed_with_errors means some mail or folders need retry."""
     from . import jobs
-    return jobs.status(config(), job_id)
+    cfg = config()
+    result = jobs.status(cfg, job_id)
+    from .features import progress
+    result["folder_progress"] = progress(cfg)["folders"]
+    return result
 
 
 @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
@@ -1345,6 +1396,37 @@ def cancel_sync_job(job_id: str | None = None) -> dict:
     """Request cancellation of the latest or specified bulk sync job. Stops cooperatively at safe boundaries; in-flight API/Outlook calls may finish. Keeps indexed mail and completed embedding caches."""
     from . import jobs
     return jobs.cancel(config(), job_id)
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
+def list_sync_failures(limit: int = 50, offset: int = 0, folder: str | None = None) -> dict:
+    """List retained failed mail IDs, sanitized causes, retry counts and scheduled retry times. No mail bodies or provider calls."""
+    from .features import failures
+    from .features import local_config
+    return failures(local_config(), limit, offset, folder)
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+def retry_failed_emails(mail_ids: list[str], max_seconds: float = 30) -> dict:
+    """Retry only 1..100 specified failure IDs immediately, bypassing backoff. Read-only Outlook access; preserve the index on failure. Time budget is cooperative."""
+    from .features import retry
+    return retry(config(), mail_ids, max_seconds)
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
+def get_sync_progress() -> dict:
+    """Read per-folder scan progress, indexed/failed counts and estimated remaining items, processing rate and ETA when known. No live Outlook calls."""
+    from .features import progress
+    from .features import local_config
+    return progress(local_config())
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
+def get_mail_thread(mail_id: str, before: int = 3, after: int = 3, max_body_chars: int = 2000) -> dict:
+    """Return the selected cached mail and preceding/following mail in the same Outlook store/conversation, chronologically. No live Outlook or embedding calls."""
+    from .features import thread
+    from .features import local_config
+    return thread(local_config(), mail_id, before, after, max_body_chars)
 
 
 def main():

@@ -69,15 +69,27 @@ Failures are retained for later retry and counted by `index_status`. Use `mainta
 | Tool | Purpose |
 | --- | --- |
 | `sync_emails` | Update the local mail index |
+| `list_sync_failures` | Inspect failed mail IDs, causes and retry schedules |
+| `retry_failed_emails` | Retry only selected failed emails |
+| `get_sync_progress` | Inspect folder progress, rate and estimated remaining time |
 | `start_sync_job` | Start continuous background bulk indexing |
 | `sync_job_status` | Inspect the latest or specified bulk job |
 | `cancel_sync_job` | Request a safe stop while retaining completed work |
 | `search_emails` | Search by meaning and keywords, with metadata filters |
 | `get_indexed_mail` | Read a cached email body |
+| `get_mail_thread` | Read cached preceding/following mail in the same conversation |
 | `index_status` | Check indexed counts and sync progress |
 | `list_outlook_sources` | Inspect connected stores, folders, and PST/OST paths |
 | `optimize_index` | Build a vector search index from at least 256 chunks |
 | `maintain_index` | Prune unused caches and compact local vector storage |
+
+## Recovery, progress and threads
+
+Use `list_sync_failures` to inspect causes and retry schedules, then pass its `mail_id` values to `retry_failed_emails(mail_ids=[...])`. The retry bypasses backoff for only those IDs; another sync owning the DB returns `busy` without changing retry state. Old failure records gain detailed causes after another attempt. Failure lists, saved progress and cached thread context remain available without the embedding API; automatic dimensions are recovered from the matching index. Provider response bodies and credentials are never stored as error details.
+
+`get_sync_progress`, `index_status` and `sync_job_status` expose per-folder indexed/failed counts, scan progress, processing rate and ETA. Remaining counts use Outlook item-count estimates, which can include non-mail items. ETA is `null` when the scope or rate is unknown, including incomplete checkpoints from older versions. A completed scan may still have failed mail to recover. These status calls use saved snapshots and make no live Outlook calls.
+
+Set `search_emails(group_by_thread=true)` to keep the strongest match per store/conversation. `thread_mail_count` includes all cached mail in that conversation, even outside search filters. Call `get_mail_thread(mail_id=..., before=3, after=3)` for chronological context around a result. Empty conversation IDs remain separate emails. Context is limited to indexed mail, with bounded body output; no additional embedding request is needed.
 
 ## Configuration
 
@@ -86,12 +98,14 @@ Only the model and API credentials are required. Other settings have defaults:
 | Setting | Default |
 | --- | --- |
 | Mail scope | All dates and connected mail folders; system/search folders excluded |
-| Database | `%LOCALAPPDATA%\outlook-rag\<index-settings-hash>` |
+| Database | `%USERPROFILE%\Documents\Outlookファイル\outlook-rag\<model>-<dimensions>d-<settings-id>` |
 | Embedding requests | Up to 8 chunks per batch, 2 requests concurrently |
 | Sync limits | 200 mail attempts, 2,000 new metadata rows, 30 seconds |
 | Vector dimensions | Up to 1,024 for Qwen3-Embedding; full dimensions for other models |
 
 Qwen3-Embedding requests reduced dimensions from the API when possible, falling back to local truncation if the route rejects or ignores the request. Stored vector dimensions do not change. Backend setup is described in [VLLM-TUNING.md](VLLM-TUNING.md).
+
+New folders include a Windows-safe model name and stored dimensions; the trailing settings ID separates different embedding/chunk settings. Existing hash-only default folders in Documents or Local AppData remain in use until explicitly moved. `OUTLOOK_RAG_DATA_DIR` always overrides the default. The database location does not determine where Outlook reads PST/OST files; connected stores are discovered through Outlook.
 
 Changing the embedding model requires re-indexing. With the default database location, a separate index is selected automatically. If you set `OUTLOOK_RAG_DATA_DIR`, use a new directory for the new model.
 

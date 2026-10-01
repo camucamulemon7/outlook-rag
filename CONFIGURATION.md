@@ -18,7 +18,7 @@ Set `OUTLOOK_RAG_EMBEDDING_URL` if your endpoint differs from the default. As an
 | OUTLOOK_RAG_EMBEDDING_URL | http://localhost:8080/api/v1/embeddings |
 | OUTLOOK_RAG_DIMENSIONS | Detect API output dimensions on the first request; reuse within the process |
 | OUTLOOK_RAG_STORAGE_DIMENSIONS | Up to 1024 for Qwen3-Embedding; full API output dimensions for other models |
-| OUTLOOK_RAG_DATA_DIR | %LOCALAPPDATA%\outlook-rag\<index-settings-hash> |
+| OUTLOOK_RAG_DATA_DIR | %USERPROFILE%\Documents\Outlookファイル\outlook-rag\<model>-<dimensions>d-<settings-id> |
 | OUTLOOK_RAG_KEY_FILE | %LOCALAPPDATA%\outlook-rag\api-key.dpapi |
 | OUTLOOK_RAG_FOLDERS | auto: recursively discover connected Outlook mail folders |
 | OUTLOOK_RAG_SINCE_DAYS | 0: all dates; "all" is also accepted |
@@ -81,6 +81,8 @@ Open archive PSTs are included in discovery. Disconnected PSTs are not searched 
 Folder counts come from Outlook's `Items.Count` and may include non-mail items. Synchronization indexes mail items only.
 
 ## Database changes and authentication
+
+New indexes default to `%USERPROFILE%\Documents\Outlookファイル\outlook-rag\<model>-<dimensions>d-<settings-id>`. The model name is sanitized for Windows and stored dimensions are visible; the settings ID prevents mixing embedding/chunk configurations. Existing hash-only default indexes in Documents or Local AppData remain in use, with the new named location taking precedence if it exists. Explicit `OUTLOOK_RAG_DATA_DIR` values are unchanged. API key files remain under Local AppData. To relocate an existing index, stop its MCP and background workers, move the complete index directory, and set `OUTLOOK_RAG_DATA_DIR` to the new path.
 
 Changing the model, vector dimensions, chunking, or other index identity settings requires re-indexing. The default database path selects a separate index automatically. If `OUTLOOK_RAG_DATA_DIR` is fixed, choose a new directory for the new settings.
 
