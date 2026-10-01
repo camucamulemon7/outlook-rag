@@ -33,7 +33,7 @@ Add the following to your OpenCode configuration. Replace the model and API key 
         "type": "local",
         "command": [
           "uvx", "--python", "3.12", "--from",
-          "git+https://github.com/camucamulemon7/outlook-rag.git@v0.7.0",
+          "git+https://github.com/camucamulemon7/outlook-rag.git@v0.8.0",
           "outlook-rag"
         ],
         "environment": {
@@ -50,7 +50,7 @@ uvx installs the server and its dependencies on first connection. No clone or se
 
 The default embedding endpoint is `http://localhost:8080/api/v1/embeddings`. Add `OUTLOOK_RAG_EMBEDDING_URL` to `environment` for another endpoint.
 
-For offline startup, replace `@v0.7.0` with the full commit SHA shown on GitHub, run that command online once, then add `--offline` after `uvx`. Keep the Python version and uv caches available. Your embedding API must still be running.
+For offline startup, replace `@v0.8.0` with the full commit SHA shown on GitHub, run that command online once, then add `--offline` after `uvx`. Keep the Python version and uv caches available. Your embedding API must still be running.
 
 ## Usage
 
@@ -62,7 +62,7 @@ For a smaller sync, call `sync_emails` with `{"max_total_emails": 10}`. After bu
 
 Background jobs survive MCP disconnects. Only one bulk worker runs per database; another start returns the existing job. Cancellation is cooperative, so an in-flight Outlook/API call may finish first. After a computer restart or an interrupted worker, start another job to resume saved checkpoints and cached embeddings. A `completed_with_errors` result means some mail or folders still need attention.
 
-`sync_emails` remains available for small foreground updates. Its default limits are 200 mail attempts, 2,000 new metadata rows and a 30-second cooperative budget. Bulk jobs use the same settings and immediately start the next cycle when needed.
+`sync_emails` remains available for small foreground updates. Its default limits are 200 mail attempts, 2,000 new metadata rows and a 30-second cooperative budget. Bulk jobs use the same settings and immediately start the next cycle when needed. While embedding requests run, sync reads ahead up to 16 additional rows on the Outlook thread. Set `OUTLOOK_RAG_SYNC_PREFETCH_EMAILS=0` to disable it.
 
 Failures are retained for later retry and counted by `index_status`. Use `maintain_index` when you want to remove unused embedding caches and compact vector storage; recent versions are retained for seven days.
 

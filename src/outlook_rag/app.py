@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from array import array
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import hashlib
 import fnmatch
@@ -38,13 +39,59 @@ class SyncCancelled(httpx.RequestError):
     """Cooperative cancellation; completed embedding requests remain cached."""
 
 
+class ReadAhead:
+    """Bounded caller-thread prefetch; COM and SQLite never cross threads."""
+    def __init__(self, source, prepare, limit, allowed):
+        self.source, self.prepare = iter(source), prepare
+        self.limit, self.allowed = limit, allowed
+        self.buffer = deque()
+        self.finished = False
+        self.error = None
+        self.read_ms = 0.0
+        self.rows = 0
+        self.peak = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.buffer:
+            return self.buffer.popleft()
+        if self.error is not None:
+            raise self.error
+        if self.finished:
+            raise StopIteration
+        return next(self.source)
+
+    def can_fill(self):
+        return not self.finished and len(self.buffer) < self.limit and self.allowed(len(self.buffer))
+
+    def fill_one(self):
+        if not self.can_fill():
+            return
+        started = time.perf_counter()
+        try:
+            value = self.prepare(next(self.source))
+        except StopIteration:
+            self.finished = True
+        except Exception as exc:
+            # Surface metadata scan errors only after earlier buffered rows.
+            self.finished, self.error = True, exc
+        else:
+            self.buffer.append(value)
+            self.rows += 1
+            self.peak = max(self.peak, len(self.buffer))
+        finally:
+            self.read_ms += (time.perf_counter() - started) * 1000
+
+
 def config(*, resolve_dimensions: bool = True) -> dict:
     path = os.environ.get("OUTLOOK_RAG_CONFIG")
     config_path = Path(path).expanduser().resolve() if path else Path.cwd() / "config.json"
     cfg = json.loads(config_path.read_text(encoding="utf-8-sig")) if path else {}
     converters = {"dimensions": lambda value: None if value.lower() == "auto" else int(value), "storage_dimensions": int, "embedding_batch_size": int,
                   "embedding_concurrent_requests": int, "embedding_max_batch_chars": int,
-                  "sync_batch_emails": int, "sync_max_emails": int, "sync_max_total_emails": int, "text_cleaning_version": int,
+                  "sync_prefetch_emails": int, "sync_batch_emails": int, "sync_max_emails": int, "sync_max_total_emails": int, "text_cleaning_version": int,
                   "since_days": lambda value: 0 if value.lower() == "all" else int(value),
                   "folders": lambda value: "auto" if value.lower() == "auto" else json.loads(value),
                   "excluded_folders": json.loads, "exclude_system_folders": json.loads,
@@ -71,6 +118,9 @@ def config(*, resolve_dimensions: bool = True) -> dict:
     cfg.setdefault("sync_max_seconds", 30)
     cfg.setdefault("sync_max_scanned", 2000)
     cfg.setdefault("sync_retry_limit", 10)
+    cfg.setdefault("sync_prefetch_emails", 16)
+    if type(cfg["sync_prefetch_emails"]) is not int or not 0 <= cfg["sync_prefetch_emails"] <= 256:
+        raise ValueError("sync_prefetch_emails must be 0..256")
     cfg.setdefault("query_cache_size", 256)
     cfg.setdefault("search_candidates", 100)
     cfg.setdefault("rrf_k", 60)
@@ -459,7 +509,13 @@ def upsert_mails(mails: list[dict], sql, table, cfg: dict, client: httpx.Client 
                 submit_next()
             try:
                 while active:
-                    completed, _ = wait(active, return_when=FIRST_COMPLETED)
+                    idle = cfg.get("_embedding_idle")
+                    ready = idle and cfg.get("_embedding_idle_ready", lambda: True)()
+                    completed, _ = wait(active, timeout=0.01 if ready else None, return_when=FIRST_COMPLETED)
+                    if not completed:
+                        if idle:
+                            idle()
+                        continue
                     failure = None
                     for future in completed:
                         batch = active.pop(future)
@@ -892,8 +948,34 @@ def sync(folders: list[str] | None = None, max_emails: int | None = None, since_
                     pending.clear()
                     save_state()
 
+                def prepare_ahead(value):
+                    metadata, source = value
+                    if not metadata["mail"]:
+                        return value
+                    try:
+                        metadata = canonical_metadata(namespace, metadata, store_id, sql, alias_session)
+                    except Exception as exc:
+                        return (dict(metadata, _canonical_error=exc), source)
+                    metadata = dict(metadata, _canonical=True)
+                    mail_id = hashlib.sha256(f"{store_id}:{metadata['entry_id']}".encode()).hexdigest()
+                    previous = sql.execute("SELECT modified FROM emails WHERE id=?", (mail_id,)).fetchone()
+                    failure = sql.execute("SELECT modified FROM sync_failures WHERE mail_id=?", (mail_id,)).fetchone()
+                    if not ((previous and same_modified(previous["modified"], metadata["modified"])) or
+                            (failure and same_modified(failure["modified"], metadata["modified"]))):
+                        try:
+                            metadata["_prefetched_mail"] = read_outlook_mail(namespace, metadata, store_id, folder_name)
+                        except Exception as exc:
+                            metadata["_read_error"] = exc
+                    return metadata, source
+
+                ahead = ReadAhead(mail_metadata(folder, filters), prepare_ahead,
+                    cfg.get("sync_prefetch_emails", 16),
+                    lambda queued: not cancelled() and time.perf_counter() < deadline and
+                        queued < min(max_emails-attempted, max_total_emails-attempted_total, max_scanned-scanned_total))
+                cfg = dict(cfg, _embedding_idle=ahead.fill_one if ahead.limit else None,
+                           _embedding_idle_ready=ahead.can_fill)
                 try:
-                    for metadata, metadata_source in mail_metadata(folder, filters):
+                    for metadata, metadata_source in ahead:
                         if cancelled():
                             complete, stop_reason = False, "cancelled"
                             break
@@ -920,7 +1002,10 @@ def sync(folders: list[str] | None = None, max_emails: int | None = None, since_
                             advance(metadata)
                             continue
                         try:
-                            metadata = canonical_metadata(namespace, metadata, store_id, sql, alias_session)
+                            if "_canonical_error" in metadata:
+                                raise metadata["_canonical_error"]
+                            if not metadata.get("_canonical"):
+                                metadata = canonical_metadata(namespace, metadata, store_id, sql, alias_session)
                         except Exception as exc:
                             flush()
                             attempted += 1
@@ -944,7 +1029,11 @@ def sync(folders: list[str] | None = None, max_emails: int | None = None, since_
                         attempted += 1
                         attempted_total += 1
                         try:
-                            mail = read_outlook_mail(namespace, metadata, store_id, folder_name)
+                            if "_read_error" in metadata:
+                                raise metadata["_read_error"]
+                            mail = metadata.get("_prefetched_mail")
+                            if mail is None:
+                                mail = read_outlook_mail(namespace, metadata, store_id, folder_name)
                         except Exception as exc:
                             flush()
                             record_sync_failure(sql, metadata, store_id, folder_name, exc)
@@ -963,6 +1052,10 @@ def sync(folders: list[str] | None = None, max_emails: int | None = None, since_
                     complete = False
                     flush()
                     folder_errors.append({"folder": folder_name, "error_type": type(exc).__name__})
+                batch_stats.update(prefetched_rows=ahead.rows, prefetch_peak_rows=ahead.peak,
+                                   prefetch_read_ms=round(ahead.read_ms))
+                cfg.pop("_embedding_idle", None)
+                cfg.pop("_embedding_idle_ready", None)
                 removed = 0
                 if complete and mode == "reconcile" and not reconcile_uncertain:
                     candidates = sql.execute("SELECT id,received FROM emails WHERE store_id=? AND folder=? AND id NOT IN (SELECT mail_id FROM sync_seen WHERE scan_key=?)",
@@ -1116,7 +1209,7 @@ def status() -> dict:
                     "sync_max_seconds": cfg.get("sync_max_seconds", 30), "sync_max_scanned": cfg.get("sync_max_scanned", 2000),
                     "embedding_request_dimensions": cfg.get("embedding_request_dimensions", 0),
                     "api_dimension_reduction": _API_DIMENSIONS.get((cfg["embedding_url"], cfg["model"], cfg.get("embedding_request_dimensions", 0)), "unverified"),
-                    "embedding_batch_size": cfg["embedding_batch_size"], "embedding_concurrent_requests": cfg["embedding_concurrent_requests"], "sync_batch_emails": cfg["sync_batch_emails"],
+                    "embedding_batch_size": cfg["embedding_batch_size"], "embedding_concurrent_requests": cfg["embedding_concurrent_requests"], "sync_batch_emails": cfg["sync_batch_emails"], "sync_prefetch_emails": cfg.get("sync_prefetch_emails", 16),
                     "vector_rows": table.count_rows(), "vector_indexes": [str(index) for index in table.list_indices()],
                     "folders": [dict(row) for row in sql.execute("SELECT folder, count(*) AS emails, max(indexed_at) AS last_indexed FROM emails GROUP BY folder")],
                     "sync_windows": [window for row in sql.execute("SELECT value FROM state WHERE key LIKE 'sync:%'")

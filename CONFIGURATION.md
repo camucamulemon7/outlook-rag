@@ -28,6 +28,7 @@ Set `OUTLOOK_RAG_EMBEDDING_URL` if your endpoint differs from the default. As an
 | OUTLOOK_RAG_EMBEDDING_CONCURRENT_REQUESTS | Up to 2 requests |
 | OUTLOOK_RAG_EMBEDDING_MAX_BATCH_CHARS | 24000 characters |
 | OUTLOOK_RAG_SYNC_BATCH_EMAILS | Save batches of 16 emails |
+| OUTLOOK_RAG_SYNC_PREFETCH_EMAILS | Read up to 16 additional rows during embedding requests; 0 disables prefetch (range 0..256) |
 | OUTLOOK_RAG_SYNC_MAX_EMAILS | Up to 200 mail attempts per folder per call |
 | OUTLOOK_RAG_SYNC_MAX_TOTAL_EMAILS | Up to 200 mail attempts across the entire call |
 | OUTLOOK_RAG_SYNC_MAX_SECONDS | 30-second cooperative budget; in-flight calls may overrun |
@@ -86,3 +87,5 @@ Changing the model, vector dimensions, chunking, or other index identity setting
 The CLI also accepts `--config <path>`; MCP environment variables override values in that file. Relative database and key-file paths in a config file are resolved against its directory.
 
 To store an encrypted API key interactively, run `outlook-rag set-key` with the desired settings. Input is hidden. DPAPI keys can be decrypted only by the Windows user who saved them; save the key again on another computer or account.
+
+During embedding requests, sync reads ahead on the Outlook/SQLite owner thread. HTTP requests run in the existing worker pool. At most `SYNC_PREFETCH_EMAILS` extra rows are buffered; already-indexed mail is checked before reading its body. Prefetched rows do not advance checkpoints until processed and saved. Cancellation, time limits and provider failures leave unpublished rows for the next sync. API batch size/concurrency and indexed content are unchanged. Folder `batch_stats` reports `prefetched_rows`, `prefetch_peak_rows` and `prefetch_read_ms`; these timings overlap embedding time and should not be added to it.
