@@ -8,7 +8,7 @@ Semantic and keyword search for Outlook email through MCP. Index your mail local
 
 - Semantic search combined with Japanese keyword search (BM25 + vector search).
 - All-date indexing of connected mail folders, including open archive PSTs.
-- Resumable updates with time/scan limits, fair folder rotation, and failed-mail retries.
+- Background bulk indexing with progress and cancellation, resumable updates, and failed-mail retries.
 - Persistent document and query embedding caches, plus local database maintenance.
 - Support for Qwen and other OpenAI-compatible embedding models.
 - Local storage with read-only access to Outlook.
@@ -33,7 +33,7 @@ Add the following to your OpenCode configuration. Replace the model and API key 
         "type": "local",
         "command": [
           "uvx", "--python", "3.12", "--from",
-          "git+https://github.com/camucamulemon7/outlook-rag.git@v0.6.1",
+          "git+https://github.com/camucamulemon7/outlook-rag.git@v0.7.0",
           "outlook-rag"
         ],
         "environment": {
@@ -50,21 +50,28 @@ uvx installs the server and its dependencies on first connection. No clone or se
 
 The default embedding endpoint is `http://localhost:8080/api/v1/embeddings`. Add `OUTLOOK_RAG_EMBEDDING_URL` to `environment` for another endpoint.
 
-For offline startup, replace `@v0.6.1` with the full commit SHA shown on GitHub, run that command online once, then add `--offline` after `uvx`. Keep the Python version and uv caches available. Your embedding API must still be running.
+For offline startup, replace `@v0.7.0` with the full commit SHA shown on GitHub, run that command online once, then add `--offline` after `uvx`. Keep the Python version and uv caches available. Your embedding API must still be running.
 
 ## Usage
 
-1. Call `sync_emails` to index mail. Defaults are 200 mail attempts, 2,000 new metadata rows, and a 30-second cooperative time budget; repeat until folder windows are complete and no folders remain pending. In-flight API/Outlook calls can overrun the time budget.
+1. Call `start_sync_job` for bulk indexing. It returns a `job_id` promptly and continues through bounded sync cycles in a separate process. Call `sync_job_status` to inspect progress, or `cancel_sync_job` to request a safe stop.
 2. Call `search_emails` with a natural-language query, then `get_indexed_mail` to read a result.
 3. Call `sync_emails` again when you want to include new or changed mail. Sync does not run automatically.
 
-For a smaller sync, pass `{"max_total_emails": 10}`. After bulk indexing, call `optimize_index` to build the vector search index.
+For a smaller sync, call `sync_emails` with `{"max_total_emails": 10}`. After bulk indexing, call `optimize_index` to build the vector search index.
+
+Background jobs survive MCP disconnects. Only one bulk worker runs per database; another start returns the existing job. Cancellation is cooperative, so an in-flight Outlook/API call may finish first. After a computer restart or an interrupted worker, start another job to resume saved checkpoints and cached embeddings. A `completed_with_errors` result means some mail or folders still need attention.
+
+`sync_emails` remains available for small foreground updates. Its default limits are 200 mail attempts, 2,000 new metadata rows and a 30-second cooperative budget. Bulk jobs use the same settings and immediately start the next cycle when needed.
 
 Failures are retained for later retry and counted by `index_status`. Use `maintain_index` when you want to remove unused embedding caches and compact vector storage; recent versions are retained for seven days.
 
 | Tool | Purpose |
 | --- | --- |
 | `sync_emails` | Update the local mail index |
+| `start_sync_job` | Start continuous background bulk indexing |
+| `sync_job_status` | Inspect the latest or specified bulk job |
+| `cancel_sync_job` | Request a safe stop while retaining completed work |
 | `search_emails` | Search by meaning and keywords, with metadata filters |
 | `get_indexed_mail` | Read a cached email body |
 | `index_status` | Check indexed counts and sync progress |

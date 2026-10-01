@@ -27,7 +27,7 @@ async def main():
             await session.initialize()
             tools = await session.list_tools()
             names = [tool.name for tool in tools.tools]
-            assert set(names) == {"search_emails", "index_status", "get_indexed_mail", "sync_emails", "optimize_index", "list_outlook_sources", "maintain_index"}
+            assert set(names) == {"search_emails", "index_status", "get_indexed_mail", "sync_emails", "optimize_index", "list_outlook_sources", "maintain_index", "start_sync_job", "sync_job_status", "cancel_sync_job"}
             status = payload(await session.call_tool("index_status", {}))
             assert status["emails"] > 0
             timings = []

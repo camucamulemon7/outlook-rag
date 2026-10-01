@@ -61,6 +61,10 @@ Unreadable mail and permanent input errors are retained for retry with increasin
 
 Completed embedding requests are cached immediately, including successful requests already in flight when another request fails. A retry reuses those chunks after a process restart. Interrupted mail updates keep the previous searchable version until all replacement chunks are ready. Maintenance retains caches referenced by unfinished mail batches; references are released when a mail is published or its pending content is replaced.
 
+For bulk indexing, call `start_sync_job` once, then inspect `sync_job_status`. The detached worker repeats bounded sync cycles without agent/tool invocation gaps. It survives MCP disconnects and keeps one worker per database. `cancel_sync_job` requests cooperative cancellation while retaining indexed mail, checkpoints and completed embeddings. Existing sync settings apply; no additional settings are required. Startup alone does not launch a bulk job.
+
+Job records and resolved settings are stored under `<data_dir>/jobs`. API key environment values are inherited by the worker and are not written into job snapshots. Encrypted key-file paths are retained. Worker crashes/computer restarts are reported as interrupted; start another job to resume the index. Jobs with failed mail/folders end as completed_with_errors; repeated provider outages or lack of progress end as blocked. No automatic ANN rebuild or continuous mail monitoring is performed by a bulk job.
+
 `maintain_index` prunes unused document embedding caches, enforces the query cache limit, and compacts vector storage while retaining versions for seven days. It does not delete mail or current chunks.
 
 Server-side dimension requests do not change index identity: full output is still detected as the model's native dimension, and stored dimensions remain fixed. Unsupported dimension requests fall back once per process. Only request reduced dimensions from models that support MRL.

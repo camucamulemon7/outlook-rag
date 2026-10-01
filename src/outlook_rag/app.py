@@ -34,6 +34,10 @@ _DIMENSIONS = {}
 _API_DIMENSIONS = {}
 
 
+class SyncCancelled(httpx.RequestError):
+    """Cooperative cancellation; completed embedding requests remain cached."""
+
+
 def config(*, resolve_dimensions: bool = True) -> dict:
     path = os.environ.get("OUTLOOK_RAG_CONFIG")
     config_path = Path(path).expanduser().resolve() if path else Path.cwd() / "config.json"
@@ -189,6 +193,8 @@ def embed(texts: list[str], cfg: dict, *, query: bool = False, client: httpx.Cli
         payload["dimensions"] = requested
     def send(body):
         options = {}
+        if cfg.get("_cancel_check", lambda: False)():
+            raise SyncCancelled("Sync cancelled")
         if "_embedding_deadline" in cfg:
             remaining = cfg["_embedding_deadline"] - time.perf_counter()
             if remaining <= 0:
@@ -712,7 +718,7 @@ def permanent_mail_error(exc):
 
 def sync(folders: list[str] | None = None, max_emails: int | None = None, since_days: int | None = None,
          reconcile: bool = False, max_total_emails: int | None = None,
-         max_seconds: float | None = None, max_scanned: int | None = None) -> dict:
+         max_seconds: float | None = None, max_scanned: int | None = None, *, _cancel_check=None) -> dict:
     cfg = config()
     max_emails = max_emails if max_emails is not None else cfg.get("sync_max_emails", 200)
     max_total_emails = max_total_emails if max_total_emails is not None else cfg.get("sync_max_total_emails", 200)
@@ -729,7 +735,8 @@ def sync(folders: list[str] | None = None, max_emails: int | None = None, since_
         raise ValueError("since_days must be 0 (all time), 'all', or 1..36500")
     started = time.perf_counter()
     deadline = started + max_seconds
-    cfg = dict(cfg, _embedding_deadline=deadline)
+    cancelled = _cancel_check or (lambda: False)
+    cfg = dict(cfg, _embedding_deadline=deadline, _cancel_check=cancelled)
     import pythoncom
     import pywintypes
     import win32com.client
@@ -762,6 +769,9 @@ def sync(folders: list[str] | None = None, max_emails: int | None = None, since_
                 ",".join("?" for _ in allowed_folders) + ") ORDER BY next_retry LIMIT ?",
                 [time.time(), *sorted(allowed_folders), cfg.get("sync_retry_limit", 10)]).fetchall() if allowed_folders else []
             for failure in due:
+                if cancelled():
+                    stop_reason = "cancelled"
+                    break
                 if failure["folder"] not in allowed_folders:
                     continue
                 if time.perf_counter() >= deadline or attempted_total >= max_total_emails:
@@ -784,7 +794,7 @@ def sync(folders: list[str] | None = None, max_emails: int | None = None, since_
                     indexed_total += 1
                 except Exception as exc:
                     if isinstance(exc, httpx.HTTPError) and not permanent_mail_error(exc):
-                        stop_reason = "time_limit" if time.perf_counter() >= deadline else "embedding_unavailable"
+                        stop_reason = "cancelled" if isinstance(exc, SyncCancelled) else "time_limit" if time.perf_counter() >= deadline else "embedding_unavailable"
                         break
                     if not permanent_mail_error(exc):
                         raise
@@ -792,6 +802,8 @@ def sync(folders: list[str] | None = None, max_emails: int | None = None, since_
                     failed_total += 1
 
             for target_position, (folder_name, folder) in enumerate(targets):
+                if cancelled():
+                    stop_reason = "cancelled"
                 if stop_reason or attempted_total >= max_total_emails or scanned_total >= max_scanned or time.perf_counter() >= deadline:
                     stop_reason = stop_reason or ("email_limit" if attempted_total >= max_total_emails else "scan_limit" if scanned_total >= max_scanned else "time_limit")
                     pending_folders = [name for name, _ in targets[target_position:]]
@@ -882,6 +894,9 @@ def sync(folders: list[str] | None = None, max_emails: int | None = None, since_
 
                 try:
                     for metadata, metadata_source in mail_metadata(folder, filters):
+                        if cancelled():
+                            complete, stop_reason = False, "cancelled"
+                            break
                         if time.perf_counter() >= deadline:
                             complete, stop_reason = False, "time_limit"
                             break
@@ -941,8 +956,8 @@ def sync(folders: list[str] | None = None, max_emails: int | None = None, since_
                         if len(pending) >= cfg.get("sync_batch_emails", 16):
                             flush()
                     flush()
-                except httpx.HTTPError:
-                    complete, stop_reason = False, "time_limit" if time.perf_counter() >= deadline else "embedding_unavailable"
+                except httpx.HTTPError as exc:
+                    complete, stop_reason = False, "cancelled" if isinstance(exc, SyncCancelled) else "time_limit" if time.perf_counter() >= deadline else "embedding_unavailable"
                     pending.clear()
                 except pywintypes.com_error as exc:
                     complete = False
@@ -1218,6 +1233,27 @@ def maintain_index() -> dict:
     return maintain()
 
 
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+def start_sync_job(folders: list[str] | None = None, since_days: int | None = None, reconcile: bool = False) -> dict:
+    """Start one detached bulk sync worker per database. Returns promptly with a job_id. Continues across MCP disconnects; uses existing sync limits and checkpoints. Inspect with sync_job_status; cancel cooperatively with cancel_sync_job."""
+    from . import jobs
+    return jobs.start(config(), folders, since_days, reconcile)
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
+def sync_job_status(job_id: str | None = None) -> dict:
+    """Read durable bulk job progress, counters and current index coverage. Omit job_id for the latest job. Completed_with_errors means some mail or folders need retry."""
+    from . import jobs
+    return jobs.status(config(), job_id)
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+def cancel_sync_job(job_id: str | None = None) -> dict:
+    """Request cancellation of the latest or specified bulk sync job. Stops cooperatively at safe boundaries; in-flight API/Outlook calls may finish. Keeps indexed mail and completed embedding caches."""
+    from . import jobs
+    return jobs.cancel(config(), job_id)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config")
@@ -1238,10 +1274,16 @@ def main():
     search_parser.add_argument("--limit", type=int, default=10)
     sub.add_parser("optimize")
     sub.add_parser("maintain")
+    worker_parser = sub.add_parser("_job-worker", help=argparse.SUPPRESS)
+    worker_parser.add_argument("job_id")
     args = parser.parse_args()
     if args.config:
         os.environ["OUTLOOK_RAG_CONFIG"] = args.config
     cfg = config(resolve_dimensions=args.command != "set-key")
+    if args.command == "_job-worker":
+        from . import jobs
+        jobs.run(args.job_id, cfg)
+        return
     if args.command != "set-key":
         api_key(cfg)
     if args.command == "set-key":
