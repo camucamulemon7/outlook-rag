@@ -59,6 +59,8 @@ GetTable short-term EntryIDs are mapped to canonical MailItem IDs before indexin
 
 Unreadable mail and permanent input errors are retained for retry with increasing backoff. Provider/network outages stop the current call without advancing over uncommitted input. `index_status` exposes the failed-mail count; a completed scan can still have failures awaiting retry.
 
+Completed embedding requests are cached immediately, including successful requests already in flight when another request fails. A retry reuses those chunks after a process restart. Interrupted mail updates keep the previous searchable version until all replacement chunks are ready. Maintenance retains caches referenced by unfinished mail batches; references are released when a mail is published or its pending content is replaced.
+
 `maintain_index` prunes unused document embedding caches, enforces the query cache limit, and compacts vector storage while retaining versions for seven days. It does not delete mail or current chunks.
 
 Server-side dimension requests do not change index identity: full output is still detected as the model's native dimension, and stored dimensions remain fixed. Unsupported dimension requests fall back once per process. Only request reduced dimensions from models that support MRL.

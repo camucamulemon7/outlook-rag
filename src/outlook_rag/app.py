@@ -330,6 +330,7 @@ def open_store(cfg: dict):
     CREATE VIRTUAL TABLE IF NOT EXISTS lexical USING fts5(chunk_id UNINDEXED, terms);
     CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE IF NOT EXISTS embedding_cache (hash TEXT PRIMARY KEY, vector BLOB NOT NULL, terms TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS embedding_pending (email_id TEXT, hash TEXT, PRIMARY KEY(email_id, hash));
     CREATE TABLE IF NOT EXISTS query_cache (hash TEXT PRIMARY KEY, vector BLOB NOT NULL, last_used REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS sync_seen (scan_key TEXT, mail_id TEXT, PRIMARY KEY(scan_key, mail_id));
     CREATE TABLE IF NOT EXISTS sync_failures (mail_id TEXT PRIMARY KEY, entry_id TEXT, store_id TEXT,
@@ -366,9 +367,10 @@ def upsert_mails(mails: list[dict], sql, table, cfg: dict, client: httpx.Client 
 
     The local index is the recovery marker; vector writes precede the SQL commit.
     A failed batch is retried idempotently, and sync watermarks do not advance.
+    Successful embedding requests are committed separately for reuse on retry.
     """
     stats = dict(embedded_chunks=0, cache_hits=0, unchanged_content=0, embedding_requests=0, sanitized_emails=0,
-                 prepare_ms=0, embedding_ms=0, tokenize_ms=0, vector_write_ms=0, sql_write_ms=0)
+                 prepare_ms=0, embedding_ms=0, tokenize_ms=0, cache_write_ms=0, vector_write_ms=0, sql_write_ms=0)
     normalized = []
     for mail in mails:
         cleaned = {key: safe_text(value) if isinstance(value,str) else value for key,value in mail.items()}
@@ -401,7 +403,10 @@ def upsert_mails(mails: list[dict], sql, table, cfg: dict, client: httpx.Client 
             missing.append((digest, text))
     stats["cache_hits"] = sum(digest in cached for *_, digest in records)
     stats["prepare_ms"] = round((time.perf_counter() - stage) * 1000)
-    new_cache = []
+    # Protect completed embeddings from maintenance until their mail is published.
+    with sql:
+        sql.executemany("DELETE FROM embedding_pending WHERE email_id=?", [(mid,) for mid in changed])
+        sql.executemany("INSERT OR IGNORE INTO embedding_pending VALUES (?,?)", [(mid, digest) for _, mid, _, _, digest in records])
     if client is None:
         client = httpx.Client(timeout=httpx.Timeout(120, connect=10), trust_env=False)
         owned = True
@@ -418,7 +423,24 @@ def upsert_mails(mails: list[dict], sql, table, cfg: dict, client: httpx.Client 
         if pending:
             batches.append(pending)
         stage = time.perf_counter()
-        results = []
+        tokenize_seconds = cache_seconds = 0.0
+        def persist_batch(batch, vectors):
+            nonlocal tokenize_seconds, cache_seconds
+            if len(vectors) != len(batch):
+                raise ValueError("Embedding API returned an unexpected number of vectors.")
+            mark = time.perf_counter()
+            entries = []
+            for (digest, text), vector in zip(batch, vectors):
+                terms = tokens(text)
+                cached[digest] = (vector, terms)
+                entries.append((digest, array("f", vector).tobytes(), terms))
+            tokenize_seconds += time.perf_counter() - mark
+            mark = time.perf_counter()
+            with sql:
+                sql.executemany("INSERT OR IGNORE INTO embedding_cache VALUES (?, ?, ?)", entries)
+            cache_seconds += time.perf_counter() - mark
+            stats["embedding_requests"] += 1
+            stats["embedded_chunks"] += len(batch)
         workers = cfg.get("embedding_concurrent_requests", 2)
         with ThreadPoolExecutor(max_workers=workers) as pool:
             iterator = iter(batches)
@@ -432,24 +454,38 @@ def upsert_mails(mails: list[dict], sql, table, cfg: dict, client: httpx.Client 
             try:
                 while active:
                     completed, _ = wait(active, return_when=FIRST_COMPLETED)
+                    failure = None
                     for future in completed:
                         batch = active.pop(future)
-                        results.append((batch, future.result()))
+                        try:
+                            vectors = future.result()
+                        except Exception as exc:
+                            failure = failure or exc
+                        else:
+                            persist_batch(batch, vectors)
+                    if failure is not None:
+                        # Do not launch more requests. Retain successes already in flight,
+                        # even if the failed future completed before a successful one.
+                        for future in active:
+                            future.cancel()
+                        for future, batch in active.items():
+                            if future.cancelled():
+                                continue
+                            try:
+                                vectors = future.result()
+                            except Exception:
+                                continue
+                            persist_batch(batch, vectors)
+                        raise failure
+                    for _ in completed:
                         submit_next()
             except Exception:
                 for future in active:
                     future.cancel()
                 raise
-        stats["embedding_ms"] = round((time.perf_counter() - stage) * 1000)
-        stats["embedding_requests"] = len(results)
-        stats["embedded_chunks"] = len(missing)
-        stage = time.perf_counter()
-        for batch, vectors in results:
-            for (digest, text), vector in zip(batch, vectors):
-                terms = tokens(text)
-                cached[digest] = (vector, terms)
-                new_cache.append((digest, array("f", vector).tobytes(), terms))
-        stats["tokenize_ms"] = round((time.perf_counter() - stage) * 1000)
+        stats["embedding_ms"] = round(max(0, time.perf_counter() - stage - tokenize_seconds - cache_seconds) * 1000)
+        stats["tokenize_ms"] = round(tokenize_seconds * 1000)
+        stats["cache_write_ms"] = round(cache_seconds * 1000)
     finally:
         if owned:
             client.close()
@@ -460,7 +496,6 @@ def upsert_mails(mails: list[dict], sql, table, cfg: dict, client: httpx.Client 
     stats["vector_write_ms"] = round((time.perf_counter() - stage) * 1000)
     stage = time.perf_counter()
     with sql:
-        sql.executemany("INSERT OR IGNORE INTO embedding_cache VALUES (?, ?, ?)", new_cache)
         for mail_id in changed:
             old = sql.execute("SELECT id FROM chunks WHERE email_id=?", (mail_id,)).fetchall()
             sql.executemany("DELETE FROM lexical WHERE chunk_id=?", [(row[0],) for row in old])
@@ -470,6 +505,7 @@ def upsert_mails(mails: list[dict], sql, table, cfg: dict, client: httpx.Client 
         columns = ("id", "entry_id", "store_id", "folder", "subject", "sender", "recipients", "received", "modified", "body", "conversation_id")
         sql.executemany("INSERT OR REPLACE INTO emails VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                         [tuple(mail.get(column, "") for column in columns) + (datetime.now(timezone.utc).isoformat(),) for mail in mails])
+        sql.executemany("DELETE FROM embedding_pending WHERE email_id=?", [(mail["id"],) for mail in mails])
     stats["sql_write_ms"] = round((time.perf_counter() - stage) * 1000)
     return stats
 
@@ -954,6 +990,7 @@ def remove_mail(mail_id, sql, table):
         sql.executemany("DELETE FROM lexical WHERE chunk_id=?", [(row[0],) for row in ids])
         sql.execute("DELETE FROM chunks WHERE email_id=?", (mail_id,))
         sql.execute("DELETE FROM emails WHERE id=?", (mail_id,))
+        sql.execute("DELETE FROM embedding_pending WHERE email_id=?", (mail_id,))
 
 
 def cached_query_vector(query: str, sql, cfg: dict):
@@ -1121,6 +1158,7 @@ def maintain() -> dict:
                 sql.executemany("INSERT OR IGNORE INTO active_hashes VALUES (?)",
                     [(hashlib.sha256(row[0].encode()).hexdigest(),) for row in rows])
             with sql:
+                sql.execute("INSERT OR IGNORE INTO active_hashes SELECT hash FROM embedding_pending")
                 removed = sql.execute("DELETE FROM embedding_cache WHERE hash NOT IN (SELECT hash FROM active_hashes)").rowcount
                 removed_aliases = sql.execute("DELETE FROM entry_aliases WHERE last_used<?", (time.time() - 7 * 86400,)).rowcount
                 sql.execute("DELETE FROM query_cache WHERE hash NOT IN (SELECT hash FROM query_cache ORDER BY last_used DESC LIMIT ?)", (cfg.get("query_cache_size", 256),))

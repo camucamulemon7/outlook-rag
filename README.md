@@ -1,4 +1,4 @@
-﻿# outlook-rag
+# outlook-rag
 
 ![outlook-rag banner](assets/header.png)
 
@@ -33,7 +33,7 @@ Add the following to your OpenCode configuration. Replace the model and API key 
         "type": "local",
         "command": [
           "uvx", "--python", "3.12", "--from",
-          "git+https://github.com/camucamulemon7/outlook-rag.git@v0.6.0",
+          "git+https://github.com/camucamulemon7/outlook-rag.git@v0.6.1",
           "outlook-rag"
         ],
         "environment": {
@@ -50,7 +50,7 @@ uvx installs the server and its dependencies on first connection. No clone or se
 
 The default embedding endpoint is `http://localhost:8080/api/v1/embeddings`. Add `OUTLOOK_RAG_EMBEDDING_URL` to `environment` for another endpoint.
 
-For offline startup, replace `@v0.6.0` with the full commit SHA shown on GitHub, run that command online once, then add `--offline` after `uvx`. Keep the Python version and uv caches available. Your embedding API must still be running.
+For offline startup, replace `@v0.6.1` with the full commit SHA shown on GitHub, run that command online once, then add `--offline` after `uvx`. Keep the Python version and uv caches available. Your embedding API must still be running.
 
 ## Usage
 
