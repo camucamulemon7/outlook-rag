@@ -269,6 +269,41 @@ class FunctionalFeatures(unittest.TestCase):
 
 
 class ReadablePaths(unittest.TestCase):
+    def test_job_snapshot_recovery_preserves_settings_and_ambiguity_guards(self):
+        with tempfile.TemporaryDirectory() as root:
+            env = dict(LOCALAPPDATA=str(Path(root)/'local'), OUTLOOK_RAG_MODEL='snapshot-model')
+            with patch.dict(os.environ, env, clear=True), patch.object(Path, 'home', return_value=Path(root)/'home'):
+                configs = []
+                for dimension in ('16', '32'):
+                    with patch.dict(os.environ, {'OUTLOOK_RAG_DIMENSIONS':dimension}):
+                        configs.append(app.config())
+                        with patch.object(jobs, 'launch_worker'):
+                            jobs.start(configs[-1])
+                with patch.object(app, 'detect_dimensions', side_effect=AssertionError('API probe forbidden')):
+                    with self.assertRaisesRegex(ValueError, 'Multiple cached indexes'):
+                        features.local_config()
+                    with patch.dict(os.environ, {'OUTLOOK_RAG_DATA_DIR':configs[0]['data_dir']}):
+                        self.assertEqual(features.local_config()['dimensions'], 16)
+                    for changed in ({'OUTLOOK_RAG_MODEL':'different'}, {'OUTLOOK_RAG_CHUNK_SIZE':'800'}):
+                        with patch.dict(os.environ, changed):
+                            self.assertFalse(features.local_config().get('dimensions'))
+
+    def test_offline_job_controls_resolve_snapshot_before_metadata_is_initialized(self):
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root)/'profile'
+            env = dict(LOCALAPPDATA=str(Path(root)/'local'), OUTLOOK_RAG_MODEL='starting-model',
+                       OUTLOOK_RAG_DIMENSIONS='16')
+            with patch.dict(os.environ, env, clear=True), patch.object(Path, 'home', return_value=home):
+                cfg = app.config()
+                with patch.object(jobs, 'launch_worker'):
+                    job = jobs.start(cfg)['job_id']
+                self.assertFalse((Path(cfg['data_dir'])/'metadata.sqlite').exists())
+                with patch.dict(os.environ, {'OUTLOOK_RAG_DIMENSIONS':'auto'}), patch.object(
+                        app, 'detect_dimensions', side_effect=AssertionError('API probe forbidden')):
+                    self.assertEqual(app.sync_job_status(job)['state'], 'starting')
+                    self.assertTrue(app.cancel_sync_job(job)['cancel_requested'])
+                    self.assertEqual(features.local_config()['data_dir'], cfg['data_dir'])
+
     def test_auto_index_diagnostics_find_cached_dimensions_without_api(self):
         with tempfile.TemporaryDirectory() as root:
             home=Path(root)/'profile';local=Path(root)/'local'

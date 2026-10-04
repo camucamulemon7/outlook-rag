@@ -1,6 +1,7 @@
 """Bulk jobs continue across bounded cycles, serialize workers, and cancel safely."""
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -105,6 +106,57 @@ class BulkJobs(unittest.TestCase):
         jobs.write(jobs.root(self.cfg)/'worker.owner.json', {'job_id':'0'*32})
         with FileLock(jobs.root(self.cfg)/'worker.lock', timeout=0):
             self.assertEqual(jobs.status(self.cfg, job)['state'], 'interrupted')
+
+    def test_status_rereads_terminal_record_when_worker_exits_during_inspection(self):
+        job = self.start()
+        path, record = jobs.load(self.cfg, job)
+        record['state'] = 'running'
+        jobs.write(path, record)
+        def exited(_cfg):
+            jobs.write(path, dict(record, state='completed', finished_at=time.time()))
+            return False
+        with patch.object(jobs, 'worker_running', side_effect=exited):
+            self.assertEqual(jobs.status(self.cfg, job)['state'], 'completed')
+
+    def test_latest_job_does_not_change_when_an_older_job_is_updated(self):
+        old = self.start()
+        old_path, record = jobs.load(self.cfg, old)
+        record['state'] = 'completed'
+        jobs.write(old_path, record)
+        new = self.start()
+        jobs.write(old_path, record)
+        self.assertEqual(jobs.status(self.cfg)['job_id'], new)
+        self.assertEqual(jobs.cancel(self.cfg)['job_id'], new)
+        self.assertFalse(jobs.paths(self.cfg, old)[1].exists())
+        self.assertTrue(jobs.paths(self.cfg, new)[1].exists())
+
+    def test_duplicate_worker_does_not_overwrite_the_active_owner(self):
+        job = self.start()
+        path, record = jobs.load(self.cfg, job)
+        record['state'] = 'running'
+        jobs.write(path, record)
+        jobs.write(jobs.root(self.cfg)/'worker.owner.json', {'job_id':job})
+        with FileLock(jobs.root(self.cfg)/'worker.lock', timeout=0):
+            with patch.object(app, 'sync') as sync:
+                jobs.run(job, self.cfg)
+            sync.assert_not_called()
+            self.assertEqual(jobs.status(self.cfg, job)['state'], 'running')
+
+    def test_cancel_before_worker_starts_never_runs_sync(self):
+        job = self.start()
+        self.assertTrue(jobs.cancel(self.cfg, job)['cancel_requested'])
+        with patch.object(app, 'sync') as sync:
+            jobs.run(job, self.cfg)
+        sync.assert_not_called()
+        self.assertEqual(jobs.status(self.cfg, job)['state'], 'cancelled')
+
+    def test_cancel_after_completion_does_not_create_a_cancellation_flag(self):
+        job = self.start()
+        with patch.object(app, 'sync', return_value=self.cycle('inbox', True)):
+            jobs.run(job, self.cfg)
+        state = jobs.cancel(self.cfg, job)
+        self.assertEqual(state['state'], 'completed')
+        self.assertFalse(state['cancel_requested'])
 
     def test_snapshot_does_not_store_api_key(self):
         with patch.dict(jobs.os.environ, {'OUTLOOK_RAG_API_KEY':'fixture-secret'}), patch.object(jobs,'launch_worker') as launch:

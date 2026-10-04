@@ -66,7 +66,7 @@ Background jobs survive MCP disconnects. Only one bulk worker runs per database;
 
 Failures are retained for later retry and counted by `index_status`. Use `maintain_index` when you want to remove unused embedding caches and compact vector storage; recent versions are retained for seven days.
 
-With an existing matching index, MCP startup, cached mail reads, index/job status and job cancellation recover dimensions locally when the embedding API is unavailable. Initial setup, search and indexing still require the API; startup still requires configured API credentials.
+With an existing matching index, MCP startup, cached mail reads, index/job status and job cancellation recover dimensions locally when the embedding API is unavailable. A saved job snapshot also allows status and cancellation before the worker initializes its database. Initial setup, search and indexing still require the API; startup still requires configured API credentials. Omitting a job ID selects the most recently created job, even if an older worker updates its status later.
 
 | Tool | Purpose |
 | --- | --- |

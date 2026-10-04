@@ -28,28 +28,33 @@ def local_config():
         candidates = []
         for root in roots:
             if root.is_dir():
-                candidates.extend(sorted((p for p in root.iterdir() if p.is_dir() and (p/"metadata.sqlite").is_file()), key=lambda p: (bool(re.fullmatch(r"[0-9a-f]{12}",p.name)),p.name)))
+                candidates.extend(sorted((p for p in root.iterdir() if p.is_dir() and
+                    ((p/"metadata.sqlite").is_file() or (p/"jobs").is_dir())),
+                    key=lambda p: (bool(re.fullmatch(r"[0-9a-f]{12}",p.name)),p.name)))
     else:
         candidates = [Path(cfg["data_dir"])]
     matches = []
     for folder in candidates:
         path = folder/"metadata.sqlite"
-        if not path.is_file():
-            continue
-        with closing(sqlite3.connect(path.resolve().as_uri()+"?mode=ro",uri=True,timeout=5)) as sql:
-            row = sql.execute("SELECT value FROM state WHERE key='embedding_identity'").fetchone()
-        if not row:
-            continue
-        identity = json.loads(row[0])
-        dimensions = identity.get("dimensions")
-        if type(dimensions) is not int or not 1 <= dimensions <= 65536:
-            continue
-        candidate = dict(cfg,dimensions=dimensions,data_dir=str(folder))
-        if "qwen3-embedding" in cfg["model"].lower():
-            candidate.setdefault("storage_dimensions",min(1024,dimensions))
-            candidate.setdefault("embedding_request_dimensions",candidate["storage_dimensions"])
-        if json.loads(app.index_identity(candidate)) == identity:
-            matches.append(candidate)
+        if path.is_file():
+            with closing(sqlite3.connect(path.resolve().as_uri()+"?mode=ro",uri=True,timeout=5)) as sql:
+                row = sql.execute("SELECT value FROM state WHERE key='embedding_identity'").fetchone()
+            saved_identities = [json.loads(row[0])] if row else []
+        else:
+            # A detached worker may not have created metadata.sqlite yet. Its
+            # resolved, credential-free snapshot still identifies the job's index.
+            saved_identities = [json.loads(app.index_identity(json.loads(p.read_text(encoding='utf-8'))))
+                                for p in (folder/'jobs').glob('*.config.json')]
+        for identity in saved_identities:
+            dimensions = identity.get("dimensions")
+            if type(dimensions) is not int or not 1 <= dimensions <= 65536:
+                continue
+            candidate = dict(cfg,dimensions=dimensions,data_dir=str(folder))
+            if "qwen3-embedding" in cfg["model"].lower():
+                candidate.setdefault("storage_dimensions",min(1024,dimensions))
+                candidate.setdefault("embedding_request_dimensions",candidate["storage_dimensions"])
+            if json.loads(app.index_identity(candidate)) == identity:
+                matches.append(candidate)
     identities = {app.index_identity(c) for c in matches}
     if len(identities)>1:
         raise ValueError("Multiple cached indexes match; set OUTLOOK_RAG_DIMENSIONS or OUTLOOK_RAG_DATA_DIR to select one.")
