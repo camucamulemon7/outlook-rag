@@ -15,10 +15,14 @@ from unittest.mock import patch
 import httpx
 
 from outlook_rag import app
+from outlook_test_support import synthetic_com
 
 
 class IndexTests(unittest.TestCase):
     def setUp(self):
+        com = synthetic_com()
+        com.__enter__()
+        self.addCleanup(com.__exit__, None, None, None)
         scratch = Path(os.environ.get("OUTLOOK_RAG_TEST_DIR", "work"))
         scratch.mkdir(exist_ok=True, parents=True)
         self.temp = tempfile.TemporaryDirectory(dir=scratch, ignore_cleanup_errors=True)
