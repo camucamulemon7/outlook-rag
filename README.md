@@ -66,6 +66,8 @@ Background jobs survive MCP disconnects. Only one bulk worker runs per database;
 
 Failures are retained for later retry and counted by `index_status`. Use `maintain_index` when you want to remove unused embedding caches and compact vector storage; recent versions are retained for seven days.
 
+With an existing matching index, MCP startup, cached mail reads, index/job status and job cancellation recover dimensions locally when the embedding API is unavailable. A saved job snapshot also allows status and cancellation before the worker initializes its database. Initial setup, search and indexing still require the API; startup still requires configured API credentials. Omitting a job ID selects the most recently created job, even if an older worker updates its status later.
+
 | Tool | Purpose |
 | --- | --- |
 | `sync_emails` | Update the local mail index |
@@ -126,6 +128,10 @@ uv run --frozen python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
 Evaluate your own labeled search queries with `tests/evaluate_search.py`; keep real-mail labels outside the repository. Candidate count and RRF weights are configurable without rebuilding the index.
+
+The offline unit tests also run on macOS and Linux using synthetic COM imports. They do not validate a real Outlook profile or Windows worker launch; those integration checks require Windows.
+
+To test an already configured embedding API with synthetic mail, provide its existing credentials through `OUTLOOK_RAG_API_KEY`, then run `uv run --frozen python tests/verify_live_api.py --url <embedding-endpoint> --model <model-id>`. Add `--uv <uv-executable>` to include the API/ANN and MCP integration scripts. The test uses temporary indexes and a local fault proxy to verify outage recovery without stopping your provider. No real Outlook mail is read; COM/WMI remain untested by this check.
 
 ## License
 

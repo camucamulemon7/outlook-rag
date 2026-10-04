@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from outlook_rag import app
+from outlook_test_support import synthetic_com
 
 
 def main():
@@ -92,7 +93,7 @@ def main():
         parts = app.chunks("長文", long_body)
         assert len(parts) > 1 and "unique00699" in parts[-1]
         assert all(f"unique{i:05d}" in "".join(parts) for i in range(700))
-        # Verify vector index construction on real 4096-dimensional vectors.
+        # Verify ANN construction using the configured stored vector dimensions.
         sample = table.search().limit(1).to_list()[0]["vector"]
         table.add([{"id": f"ann-{i}", "email_id": "0" * 64, "vector": sample} for i in range(300)])
         optimized = app.optimize()
@@ -109,7 +110,8 @@ def main():
             pass
         else:
             raise AssertionError("Mixed embedding dimensions were accepted")
-        print(json.dumps({"passed": True, "checks": ["real API semantic ranking", "Japanese hybrid search",
+        print(json.dumps({"passed": True, "outlook_backend": "synthetic_adapter",
+              "real_outlook_com_wmi": "not_tested", "checks": ["real API semantic ranking", "Japanese hybrid search",
               "sender/date/folder prefilters", "original body and truncation", "long-email coverage",
               "bounded Outlook backfill", "unchanged bodies skipped", "incremental sync", "deleted-mail reconciliation",
               f"{app.vector_dimensions(cfg)}-dimensional ANN index", "local deletion consistency", "embedding identity guard"],
@@ -117,4 +119,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    with synthetic_com():
+        main()

@@ -2,6 +2,8 @@
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,7 +12,7 @@ from unittest.mock import patch
 
 import httpx
 from filelock import FileLock
-from outlook_rag import app, features
+from outlook_rag import app, features, jobs
 import test_improvements as fixtures
 
 
@@ -43,6 +45,66 @@ class FunctionalFeatures(unittest.TestCase):
             self.assertEqual(app.list_sync_failures()['total'],1)
             self.assertEqual(app.get_sync_progress()['folders'][0]['failed_emails'],1)
         with self.assertRaises(ValueError):features.failures(dict(self.cfg,model='different'))
+
+    def test_cached_mail_status_and_job_controls_do_not_probe_provider(self):
+        mid = self.add(0)
+        with patch.object(jobs, 'launch_worker'):
+            job = jobs.start(self.cfg)['job_id']
+        env = dict(OUTLOOK_RAG_MODEL='fixture',
+                   OUTLOOK_RAG_DATA_DIR=str(Path(self.cfg['data_dir']).resolve()))
+        with patch.dict(os.environ, env, clear=True), patch.object(
+                app, 'detect_dimensions', side_effect=AssertionError('API probe forbidden')):
+            for name, invoke in (
+                ('cached mail', lambda: app.get_indexed_mail(mid)),
+                ('index status', app.index_status),
+                ('job status', lambda: app.sync_job_status(job)),
+                ('job cancel', lambda: app.cancel_sync_job(job)),
+            ):
+                with self.subTest(tool=name):
+                    result = invoke()
+                    if name == 'cached mail':
+                        self.assertEqual(result['body'], 'cached body')
+                    elif name == 'index status':
+                        self.assertEqual(result['emails'], 1)
+                        self.assertEqual(result['dimensions'], 4)
+                    else:
+                        self.assertEqual(result['job_id'], job)
+                        if name == 'job cancel':
+                            self.assertTrue(result['cancel_requested'])
+
+    def test_mcp_restart_uses_cached_dimensions_before_starting_transport(self):
+        self.add(0)
+        env = dict(OUTLOOK_RAG_MODEL='fixture', OUTLOOK_RAG_API_KEY='fixture-key',
+                   OUTLOOK_RAG_DATA_DIR=str(Path(self.cfg['data_dir']).resolve()))
+        with patch.dict(os.environ, env, clear=True), patch.object(
+                app, 'detect_dimensions', side_effect=AssertionError('API probe forbidden')), \
+                patch.object(app.sys, 'argv', ['outlook-rag']), \
+                patch.object(app.threading, 'Thread') as warmup, patch.object(app.mcp, 'run') as run:
+            app.main()
+        run.assert_called_once_with(transport='stdio')
+        warmup.return_value.start.assert_called_once()
+
+    def test_cli_status_reads_cached_index_when_provider_is_offline(self):
+        self.add(0)
+        env = {key: value for key, value in os.environ.items() if not key.startswith('OUTLOOK_RAG_')}
+        env.update(OUTLOOK_RAG_MODEL='fixture', OUTLOOK_RAG_API_KEY='fixture-key',
+                   OUTLOOK_RAG_DATA_DIR=str(Path(self.cfg['data_dir']).resolve()),
+                   OUTLOOK_RAG_EMBEDDING_URL='http://127.0.0.1:1/embeddings')
+        result = subprocess.run([sys.executable, '-m', 'outlook_rag.app', 'status'],
+                                env=env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['emails'], 1)
+
+    def test_cached_mail_does_not_open_vector_store_and_preserves_identity_guard(self):
+        mid = self.add(0)
+        with patch.object(app, 'config', return_value=self.cfg), patch.object(
+                app.lancedb, 'connect', side_effect=AssertionError('Vector store not required')):
+            result = app.get_indexed_mail(mid, 3)
+            self.assertEqual(result['body'], 'cac')
+            self.assertTrue(result['body_truncated'])
+        with patch.object(app, 'config', return_value=dict(self.cfg, model='different')):
+            with self.assertRaisesRegex(ValueError, 'settings do not match'):
+                app.get_indexed_mail(mid)
 
     def test_failure_list_paging_and_safe_causes(self):
         request=httpx.Request('POST','http://fixture.invalid',headers={'Authorization':'Bearer secret'})
@@ -207,6 +269,41 @@ class FunctionalFeatures(unittest.TestCase):
 
 
 class ReadablePaths(unittest.TestCase):
+    def test_job_snapshot_recovery_preserves_settings_and_ambiguity_guards(self):
+        with tempfile.TemporaryDirectory() as root:
+            env = dict(LOCALAPPDATA=str(Path(root)/'local'), OUTLOOK_RAG_MODEL='snapshot-model')
+            with patch.dict(os.environ, env, clear=True), patch.object(Path, 'home', return_value=Path(root)/'home'):
+                configs = []
+                for dimension in ('16', '32'):
+                    with patch.dict(os.environ, {'OUTLOOK_RAG_DIMENSIONS':dimension}):
+                        configs.append(app.config())
+                        with patch.object(jobs, 'launch_worker'):
+                            jobs.start(configs[-1])
+                with patch.object(app, 'detect_dimensions', side_effect=AssertionError('API probe forbidden')):
+                    with self.assertRaisesRegex(ValueError, 'Multiple cached indexes'):
+                        features.local_config()
+                    with patch.dict(os.environ, {'OUTLOOK_RAG_DATA_DIR':configs[0]['data_dir']}):
+                        self.assertEqual(features.local_config()['dimensions'], 16)
+                    for changed in ({'OUTLOOK_RAG_MODEL':'different'}, {'OUTLOOK_RAG_CHUNK_SIZE':'800'}):
+                        with patch.dict(os.environ, changed):
+                            self.assertFalse(features.local_config().get('dimensions'))
+
+    def test_offline_job_controls_resolve_snapshot_before_metadata_is_initialized(self):
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root)/'profile'
+            env = dict(LOCALAPPDATA=str(Path(root)/'local'), OUTLOOK_RAG_MODEL='starting-model',
+                       OUTLOOK_RAG_DIMENSIONS='16')
+            with patch.dict(os.environ, env, clear=True), patch.object(Path, 'home', return_value=home):
+                cfg = app.config()
+                with patch.object(jobs, 'launch_worker'):
+                    job = jobs.start(cfg)['job_id']
+                self.assertFalse((Path(cfg['data_dir'])/'metadata.sqlite').exists())
+                with patch.dict(os.environ, {'OUTLOOK_RAG_DIMENSIONS':'auto'}), patch.object(
+                        app, 'detect_dimensions', side_effect=AssertionError('API probe forbidden')):
+                    self.assertEqual(app.sync_job_status(job)['state'], 'starting')
+                    self.assertTrue(app.cancel_sync_job(job)['cancel_requested'])
+                    self.assertEqual(features.local_config()['data_dir'], cfg['data_dir'])
+
     def test_auto_index_diagnostics_find_cached_dimensions_without_api(self):
         with tempfile.TemporaryDirectory() as root:
             home=Path(root)/'profile';local=Path(root)/'local'
@@ -222,6 +319,10 @@ class ReadablePaths(unittest.TestCase):
                 with patch.dict(os.environ,{'OUTLOOK_RAG_MODEL':'no-existing-index','OUTLOOK_RAG_DIMENSIONS':'auto'}),patch.object(app,'detect_dimensions',side_effect=AssertionError('No probe')):
                     self.assertEqual(app.list_sync_failures()['items'],[])
                     self.assertEqual(app.get_sync_progress()['folders'],[])
+                    with self.assertRaisesRegex(ValueError, 'Index not initialized'):
+                        app.index_status()
+                    with self.assertRaisesRegex(ValueError, 'Indexed mail not found'):
+                        app.get_indexed_mail('0'*64)
 
     def test_model_name_dimensions_and_settings_isolation_with_legacy_lookup(self):
         with tempfile.TemporaryDirectory() as root:

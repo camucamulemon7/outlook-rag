@@ -1240,7 +1240,10 @@ def search(query: str, limit: int = 10, folder: str | None = None, sender: str |
 
 
 def status() -> dict:
-    cfg = config()
+    from .features import local_config
+    cfg = local_config()
+    if not cfg.get('dimensions'):
+        raise ValueError('Index not initialized. Run sync_emails with the embedding API available first.')
     with _LOCK:
         sql, table = open_store(cfg)
         try:
@@ -1269,19 +1272,18 @@ def status() -> dict:
 def get_mail(mail_id: str, max_body_chars: int = 10000) -> dict:
     if not 0 <= max_body_chars <= 100000:
         raise ValueError("max_body_chars must be 0..100000")
-    with _LOCK:
-        sql, _ = open_store(config())
-        try:
-            row = sql.execute("SELECT * FROM emails WHERE id=?", (mail_id,)).fetchone()
-            if not row:
-                raise ValueError("Indexed mail not found.")
-            result = dict(row)
-            result["body_truncated"] = len(result["body"]) > max_body_chars
-            result["body"] = result["body"][:max_body_chars]
-            result["source"] = "local_index"
-            return result
-        finally:
-            sql.close()
+    from .features import local_config, stored_sql
+    with _LOCK, stored_sql(local_config()) as sql:
+        if sql is None:
+            raise ValueError('Indexed mail not found.')
+        row = sql.execute("SELECT * FROM emails WHERE id=?", (mail_id,)).fetchone()
+        if not row:
+            raise ValueError("Indexed mail not found.")
+        result = dict(row)
+        result["body_truncated"] = len(result["body"]) > max_body_chars
+        result["body"] = result["body"][:max_body_chars]
+        result["source"] = "local_index"
+        return result
 
 
 def optimize() -> dict:
@@ -1384,7 +1386,8 @@ def start_sync_job(folders: list[str] | None = None, since_days: int | None = No
 def sync_job_status(job_id: str | None = None) -> dict:
     """Read durable bulk job progress, counters and current index coverage. Omit job_id for the latest job. Completed_with_errors means some mail or folders need retry."""
     from . import jobs
-    cfg = config()
+    from .features import local_config
+    cfg = local_config()
     result = jobs.status(cfg, job_id)
     from .features import progress
     result["folder_progress"] = progress(cfg)["folders"]
@@ -1395,7 +1398,8 @@ def sync_job_status(job_id: str | None = None) -> dict:
 def cancel_sync_job(job_id: str | None = None) -> dict:
     """Request cancellation of the latest or specified bulk sync job. Stops cooperatively at safe boundaries; in-flight API/Outlook calls may finish. Keeps indexed mail and completed embedding caches."""
     from . import jobs
-    return jobs.cancel(config(), job_id)
+    from .features import local_config
+    return jobs.cancel(local_config(), job_id)
 
 
 @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
@@ -1454,7 +1458,13 @@ def main():
     args = parser.parse_args()
     if args.config:
         os.environ["OUTLOOK_RAG_CONFIG"] = args.config
-    cfg = config(resolve_dimensions=args.command != "set-key")
+    if args.command in (None, 'status'):
+        from .features import local_config
+        cfg = local_config()
+        if args.command is None and not cfg.get('dimensions'):
+            cfg = config()
+    else:
+        cfg = config(resolve_dimensions=args.command != "set-key")
     if args.command == "_job-worker":
         from . import jobs
         jobs.run(args.job_id, cfg)
@@ -1487,7 +1497,7 @@ def main():
     elif args.command == "maintain":
         result = maintain()
     else:
-        if config().get("warmup_on_start", True):
+        if cfg.get("warmup_on_start", True):
             threading.Thread(target=warmup_embedding_api, daemon=True).start()
         mcp.run(transport="stdio")
         return

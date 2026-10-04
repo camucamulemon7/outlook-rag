@@ -1,6 +1,7 @@
 """MCP stdio handshake and read-tool checks using the registered command."""
 import asyncio
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -16,18 +17,25 @@ def payload(result):
     return json.loads(result.content[0].text)
 
 
+def server_environment(config_path):
+    key_name = json.loads(Path(config_path).read_text(encoding='utf-8-sig')).get('api_key_env', 'OUTLOOK_RAG_API_KEY')
+    return {key: value for key, value in os.environ.items()
+            if key.startswith(('OUTLOOK_RAG_', 'UV_')) or key == key_name}
+
+
 async def main():
     root = Path(__file__).resolve().parents[1]
     config_path = Path(sys.argv[1]).resolve()
     uv = sys.argv[2]
     server = StdioServerParameters(command=uv, args=["run", "--frozen", "--project", str(root),
-                                  "python", "-m", "outlook_rag.app", "--config", str(config_path)])
+                                  "python", "-m", "outlook_rag.app", "--config", str(config_path)],
+                                  env=server_environment(config_path))
     async with stdio_client(server) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = await session.list_tools()
             names = [tool.name for tool in tools.tools]
-            assert set(names) == {"search_emails", "index_status", "get_indexed_mail", "sync_emails", "optimize_index", "list_outlook_sources", "maintain_index", "start_sync_job", "sync_job_status", "cancel_sync_job"}
+            assert set(names) == {"search_emails", "index_status", "get_indexed_mail", "sync_emails", "optimize_index", "list_outlook_sources", "maintain_index", "start_sync_job", "sync_job_status", "cancel_sync_job", "list_sync_failures", "retry_failed_emails", "get_sync_progress", "get_mail_thread"}
             status = payload(await session.call_tool("index_status", {}))
             assert status["emails"] > 0
             timings = []

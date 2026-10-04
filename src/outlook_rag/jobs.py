@@ -44,7 +44,9 @@ def load(cfg, job_id=None):
         files = list(root(cfg).glob("*.job.json"))
         if not files:
             return None, None
-        path = max(files, key=lambda p: p.stat().st_mtime_ns)
+        # Worker updates must not change which job an omitted ID selects.
+        records = [(p, json.loads(p.read_text(encoding="utf-8"))) for p in files]
+        return max(records, key=lambda pair: (pair[1]["created_at"], pair[0].name))
     else:
         path, _ = paths(cfg, job_id)
     if not path.is_file():
@@ -136,6 +138,9 @@ def status(cfg, job_id=None):
     owner_path = root(cfg) / "worker.owner.json"
     owner = json.loads(owner_path.read_text(encoding="utf-8")) if running and owner_path.is_file() else {}
     owns_worker = running and owner.get("job_id") == record["job_id"]
+    # The worker can publish its terminal state between the first read and the
+    # lock inspection. Do not classify that completed job using a stale record.
+    _, record = load(cfg, record["job_id"])
     if record["state"] in ACTIVE and not owns_worker:
         if record["state"] != "starting" or time.time() - record["updated_at"] > 60:
             record = dict(record, state="interrupted", reason="worker_exited")
@@ -204,8 +209,10 @@ def run(job_id, cfg):
     from . import app
     path, flag = paths(cfg, job_id)
     _, record = load(cfg, job_id)
+    claimed_worker = False
     try:
         with FileLock(root(cfg) / "worker.lock", timeout=0):
+            claimed_worker = True
             write(root(cfg) / "worker.owner.json", {"job_id": job_id})
             app.api_key(cfg)
             record.update(state="running", pid=os.getpid(), updated_at=time.time())
@@ -270,5 +277,11 @@ def run(job_id, cfg):
             record.update(updated_at=time.time(), finished_at=time.time())
             write(path, record)
     except Exception as exc:
+        if isinstance(exc, Timeout) and not claimed_worker:
+            owner_path = root(cfg) / "worker.owner.json"
+            owner = json.loads(owner_path.read_text(encoding="utf-8")) if owner_path.is_file() else {}
+            if owner.get("job_id") == job_id:
+                # A duplicate launch must not overwrite the active owner's job.
+                return
         record.update(state="failed", error_type=type(exc).__name__, updated_at=time.time(), finished_at=time.time())
         write(path, record)

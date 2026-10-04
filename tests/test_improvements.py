@@ -12,10 +12,14 @@ from unittest.mock import patch
 
 import httpx
 from outlook_rag import app
+from outlook_test_support import synthetic_com
 
 
 class Improvements(unittest.TestCase):
     def setUp(self):
+        com = synthetic_com()
+        com.__enter__()
+        self.addCleanup(com.__exit__, None, None, None)
         Path('work').mkdir(exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(dir='work', ignore_cleanup_errors=True)
         self.cfg = dict(model='fixture', dimensions=4, embedding_url='http://fixture.invalid',
@@ -39,6 +43,8 @@ class Improvements(unittest.TestCase):
         self.embed_patch.stop()
         self.sql.close()
         self.temp.cleanup()
+        # Pipeline/recovery fixtures also call setUp/tearDown directly.
+        self.doCleanups()
 
     def folder(self, name, count, same_time=False, broken=None):
         metadata=[]
