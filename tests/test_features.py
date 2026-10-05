@@ -51,7 +51,8 @@ class FunctionalFeatures(unittest.TestCase):
         with patch.object(jobs, 'launch_worker'):
             job = jobs.start(self.cfg)['job_id']
         env = dict(OUTLOOK_RAG_MODEL='fixture',
-                   OUTLOOK_RAG_DATA_DIR=str(Path(self.cfg['data_dir']).resolve()))
+                   OUTLOOK_RAG_DATA_DIR=str(Path(self.cfg['data_dir']).resolve()),
+                   LOCALAPPDATA=str(Path(self.fixture.temp.name).resolve()))
         with patch.dict(os.environ, env, clear=True), patch.object(
                 app, 'detect_dimensions', side_effect=AssertionError('API probe forbidden')):
             for name, invoke in (
@@ -75,7 +76,8 @@ class FunctionalFeatures(unittest.TestCase):
     def test_mcp_restart_uses_cached_dimensions_before_starting_transport(self):
         self.add(0)
         env = dict(OUTLOOK_RAG_MODEL='fixture', OUTLOOK_RAG_API_KEY='fixture-key',
-                   OUTLOOK_RAG_DATA_DIR=str(Path(self.cfg['data_dir']).resolve()))
+                   OUTLOOK_RAG_DATA_DIR=str(Path(self.cfg['data_dir']).resolve()),
+                   LOCALAPPDATA=str(Path(self.fixture.temp.name).resolve()))
         with patch.dict(os.environ, env, clear=True), patch.object(
                 app, 'detect_dimensions', side_effect=AssertionError('API probe forbidden')), \
                 patch.object(app.sys, 'argv', ['outlook-rag']), \
