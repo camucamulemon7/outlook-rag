@@ -36,7 +36,7 @@ Set `OUTLOOK_RAG_EMBEDDING_URL` if your endpoint differs from the default. As an
 | OUTLOOK_RAG_SYNC_RETRY_LIMIT | Retry up to 10 due failures per call, within the overall mail/time budget |
 | OUTLOOK_RAG_QUERY_CACHE_SIZE | 256 query embeddings, evicted by least recent use; 0 disables caching |
 | OUTLOOK_RAG_EMBEDDING_REQUEST_DIMENSIONS | Qwen3-Embedding: stored dimensions. Other models: unset. 0 disables server-side reduction |
-| OUTLOOK_RAG_SEARCH_CANDIDATES | At least 100 candidates per search source (also at least 10 times the result limit) |
+| OUTLOOK_RAG_SEARCH_CANDIDATES | Initial 100 candidates per search source (also at least 10 times the result limit); expand when deduplication leaves too few results |
 | OUTLOOK_RAG_RRF_K | 60 |
 | OUTLOOK_RAG_SEMANTIC_WEIGHT | 1.0 |
 | OUTLOOK_RAG_LEXICAL_WEIGHT | 1.0 |
@@ -66,11 +66,15 @@ For bulk indexing, call `start_sync_job` once, then inspect `sync_job_status`. T
 
 Job records and resolved settings are stored under `<data_dir>/jobs`. API key environment values are inherited by the worker and are not written into job snapshots. Encrypted key-file paths are retained. Worker crashes/computer restarts are reported as interrupted; start another job to resume the index. Jobs with failed mail/folders end as completed_with_errors; repeated provider outages or lack of progress end as blocked. No automatic ANN rebuild or continuous mail monitoring is performed by a bulk job.
 
+Job diagnostics are stored in `<data_dir>/jobs/<job_id>.log` and exposed as `log_path` / `recent_logs` by status. Failed jobs include a sanitized `error_detail`. Progress and exception stack locations are recorded without raw messages, source lines, stdout/stderr or API credentials. A stdlib bootstrap records import/configuration and Windows environment-transfer errors. Each log is bounded to about 1 MiB; inactive logs older than 14 days are pruned by maintenance.
+
 `maintain_index` prunes unused document embedding caches, enforces the query cache limit, and compacts vector storage while retaining versions for seven days. It does not delete mail or current chunks.
 
 Server-side dimension requests do not change index identity: full output is still detected as the model's native dimension, and stored dimensions remain fixed. Unsupported dimension requests fall back once per process. Only request reduced dimensions from models that support MRL.
 
 Candidate count and RRF weights affect ranking only and do not require re-indexing. Use a labeled query set to compare changes before selecting new defaults.
+
+When chunk candidates collapse into too few distinct emails or threads, search doubles the pool up to 5,000 candidates per source. A five-second cooperative expansion budget is checked between rounds; a single database operation may overrun it. Results include `candidate_limit`, `candidate_cap`, `candidate_limit_reached` and `candidate_time_limit_reached`.
 
 ## Archives and file locations
 
@@ -86,8 +90,20 @@ New indexes default to `%USERPROFILE%\Documents\Outlookファイル\outlook-rag\
 
 Changing the model, vector dimensions, chunking, or other index identity settings requires re-indexing. The default database path selects a separate index automatically. If `OUTLOOK_RAG_DATA_DIR` is fixed, choose a new directory for the new settings.
 
+SQLite now records the LanceDB version published with each mail/chunk transaction. Searches read matching snapshots; a failed or interrupted vector write leaves the previous version searchable and is restored before another write. Existing indexes are adopted without changing IDs or re-indexing. Stop MCP and bulk workers before upgrading, and do not run older server versions against an index using this publication marker. Maintenance protects the published rollback version while compacting storage.
+
+Offline automatic index discovery logs unreadable SQLite/JSON/snapshot candidates and continues to a valid matching index. An explicitly selected damaged directory, or no usable match with damaged candidates present, produces a recovery error. Model/settings matching and ambiguous-dimension checks still apply.
+
 The CLI also accepts `--config <path>`; MCP environment variables override values in that file. Relative database and key-file paths in a config file are resolved against its directory.
 
 To store an encrypted API key interactively, run `outlook-rag set-key` with the desired settings. Input is hidden. DPAPI keys can be decrypted only by the Windows user who saved them; save the key again on another computer or account.
 
 During embedding requests, sync reads ahead on the Outlook/SQLite owner thread. HTTP requests run in the existing worker pool. At most `SYNC_PREFETCH_EMAILS` extra rows are buffered; already-indexed mail is checked before reading its body. Prefetched rows do not advance checkpoints until processed and saved. Cancellation, time limits and provider failures leave unpublished rows for the next sync. API batch size/concurrency and indexed content are unchanged. Folder `batch_stats` reports `prefetched_rows`, `prefetch_peak_rows` and `prefetch_read_ms`; these timings overlap embedding time and should not be added to it.
+
+Search filters are evaluated against the SQL snapshot. LanceDB receives at most 1,000 eligible email IDs per query expression, then shard top candidates are merged by cosine distance. This preserves filtered retrieval even when excluded emails dominate the global ranking. Large filters may require multiple queries; the search expansion budget is cooperative between complete rounds.
+
+`search_emails` and CLI `search --min-similarity` accept an optional cosine lower bound from -1 to 1. The default is unset. BM25 candidates also receive a measured cosine similarity when filtering is enabled. Calibrate thresholds with your model; scores are not probabilities. Snippets prefer query context within the matched chunk and remain plain text. Filtering occurs before grouping and can legitimately return zero results.
+
+CLI `job start/status/cancel`, `failures list/retry`, `progress` and `thread` reuse MCP operations and return JSON. Cached reads and cancellation recover dimensions locally and need no API key. Job start/retry use the configured provider credentials. `--config` precedes the subcommand; `--help` is available for each command group.
+
+A search source with weight `0` is disabled and cannot add zero-score candidates. With only BM25 enabled and no similarity threshold, search does not request a query embedding. A requested threshold still needs a query vector, which can come from the cache. An empty metadata-filter result returns before query embedding; nonempty conditions are checked again in the matching SQL/vector snapshot. Snippet offsets are measured in the original Unicode text. WMI startup failures retain their numeric process-creation return code in sanitized diagnostics.

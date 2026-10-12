@@ -81,7 +81,7 @@ class Improvements(unittest.TestCase):
             def GetArray(self,n):
                 rows=metadata[self.position:self.position+n]
                 self.position+=len(rows)
-                return rows
+                return tuple(zip(*rows))
         def get_table(expression):
             owner.filters.append(expression)
             return Table()
@@ -213,10 +213,8 @@ class Improvements(unittest.TestCase):
             self.assertFalse(a['query_cache_hit'])
             self.assertTrue(b['query_cache_hit'])
             self.assertEqual(calls,len(self.embed_calls))
-            self.table.delete('id IS NOT NULL')
-            with self.sql:
-                self.sql.execute('DELETE FROM chunks')
-                self.sql.execute('DELETE FROM lexical')
+            for row in self.sql.execute('SELECT id FROM emails').fetchall():
+                app.remove_mail(row[0], self.sql, self.table)
             self.assertEqual(app.search('first query')['count'],0)
 
     def test_cache_maintenance_keeps_referenced_embeddings(self):

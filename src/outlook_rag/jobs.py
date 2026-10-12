@@ -1,6 +1,8 @@
 """Detached, checkpointed bulk sync jobs using the existing sync implementation."""
 from __future__ import annotations
 
+from typing import Any
+
 import json
 import os
 import re
@@ -14,23 +16,33 @@ from pathlib import Path
 
 from filelock import FileLock, Timeout
 
+from . import diagnostics
+
 ACTIVE = {"starting", "running", "waiting"}
 
 
-def root(cfg):
+class WmiLaunchError(OSError):
+    """Keep the public WMI result code independently of unsafe error text."""
+
+    def __init__(self, code: int) -> None:
+        super().__init__("Could not start background worker via WMI")
+        self.wmi_return_code = code
+
+
+def root(cfg: dict) -> Path:
     path = Path(cfg["data_dir"]) / "jobs"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def paths(cfg, job_id):
+def paths(cfg: dict, job_id: str) -> tuple[Path, Path]:
     if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id):
         raise ValueError("Invalid job_id")
     folder = root(cfg)
     return folder / (job_id + ".job.json"), folder / (job_id + ".cancel")
 
 
-def write(path, value):
+def write(path: Path, value: Any) -> None:
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
     try:
         temporary.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
@@ -39,7 +51,7 @@ def write(path, value):
         temporary.unlink(missing_ok=True)
 
 
-def load(cfg, job_id=None):
+def load(cfg: dict, job_id: str | None=None) -> tuple[Path | None, dict | None]:
     if job_id is None:
         files = list(root(cfg).glob("*.job.json"))
         if not files:
@@ -54,7 +66,7 @@ def load(cfg, job_id=None):
     return path, json.loads(path.read_text(encoding="utf-8"))
 
 
-def worker_running(cfg):
+def worker_running(cfg: dict) -> bool:
     try:
         with FileLock(root(cfg) / "worker.lock", timeout=0):
             return False
@@ -62,7 +74,7 @@ def worker_running(cfg):
         return True
 
 
-def coverage(cfg):
+def coverage(cfg: dict) -> dict[str, int]:
     path = (Path(cfg["data_dir"]) / "metadata.sqlite").resolve()
     counts = dict(emails=0, chunks=0, cached_embeddings=0, failed_emails=0)
     if path.is_file():
@@ -74,8 +86,9 @@ def coverage(cfg):
     return counts
 
 
-def launch_worker(command, *, env):
-    options = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+def launch_worker(command: list[str], *, env: dict[str, str]) -> None:
+    worker_command = [command[0], str(Path(__file__).with_name("worker.py").resolve()), *command[3:]]
+    options: dict[str, Any] = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                    env=env, close_fds=True)
     if os.name == "nt":
         # WMI-created processes do not inherit the MCP client's Windows Job
@@ -86,18 +99,6 @@ def launch_worker(command, *, env):
 
         pipe = r"\\.\pipe\outlook-rag-" + uuid.uuid4().hex
         key = os.urandom(32)
-        bootstrap = (
-            "import os,sys,runpy,threading; from multiprocessing.connection import Listener; "
-            "timer=threading.Timer(15,lambda:os._exit(1)); timer.daemon=True; timer.start(); "
-            "listener=Listener(sys.argv[1],family='AF_PIPE',authkey=bytes.fromhex(sys.argv[2])); "
-            "connection=listener.accept(); "
-            "assert connection.poll(15), 'Worker environment transfer timed out'; "
-            "os.environ.clear(); os.environ.update(connection.recv()); "
-            "connection.close(); listener.close(); timer.cancel(); "
-            "sys.argv=sys.argv[4:]; "
-            "sys.stdin=open(os.devnull); sys.stdout=sys.stderr=open(os.devnull,'w'); "
-            "runpy.run_module('outlook_rag.app',run_name='__main__')"
-        )
         pythoncom.CoInitialize()
         try:
             wmi = win32com.client.GetObject(r"winmgmts:\\.\root\cimv2")
@@ -105,11 +106,11 @@ def launch_worker(command, *, env):
             startup.ShowWindow = 0
             process = wmi.Get("Win32_Process")
             arguments = process.Methods_("Create").InParameters.SpawnInstance_()
-            arguments.CommandLine = subprocess.list2cmdline([command[0], "-c", bootstrap, pipe, key.hex(), *command[1:]])
+            arguments.CommandLine = subprocess.list2cmdline([worker_command[0], worker_command[1], "--pipe", pipe, "--authkey", key.hex(), *worker_command[2:]])
             arguments.ProcessStartupInformation = startup
             result = process.ExecMethod_("Create", arguments)
             if result.ReturnValue:
-                raise OSError("Could not start background worker (WMI code %s)" % result.ReturnValue)
+                raise WmiLaunchError(int(result.ReturnValue))
             deadline = time.monotonic() + 10
             while True:
                 try:
@@ -126,10 +127,10 @@ def launch_worker(command, *, env):
             result = arguments = process = startup = wmi = None
             pythoncom.CoUninitialize()
     else:
-        subprocess.Popen(command, **options, start_new_session=True)
+        subprocess.Popen(worker_command, **options, start_new_session=True)
 
 
-def status(cfg, job_id=None):
+def status(cfg: dict, job_id: str | None=None) -> dict:
     path, record = load(cfg, job_id)
     if record is None:
         return {"state": "not_started"}
@@ -141,17 +142,21 @@ def status(cfg, job_id=None):
     # The worker can publish its terminal state between the first read and the
     # lock inspection. Do not classify that completed job using a stale record.
     _, record = load(cfg, record["job_id"])
+    if record is None:
+        raise ValueError("Sync job disappeared while reading status")
     if record["state"] in ACTIVE and not owns_worker:
         if record["state"] != "starting" or time.time() - record["updated_at"] > 60:
             record = dict(record, state="interrupted", reason="worker_exited")
             # Status is read-only; a later start can resume the index checkpoints.
     _, cancellation = paths(cfg, record["job_id"])
-    return {key: value for key, value in record.items() if key not in ("known", "complete")} | {
+    return {key: value for key, value in record.items() if key not in ("known", "complete", "known_sources", "complete_sources")} | {
         "elapsed_ms": round(1000 * ((record.get("finished_at") or time.time()) - record["created_at"])),
-        "cancel_requested": cancellation.exists(), "coverage": coverage(cfg)}
+        "cancel_requested": cancellation.exists(), "coverage": coverage(cfg),
+        "log_path": str(diagnostics.log_path(cfg, record["job_id"]).resolve()),
+        "recent_logs": diagnostics.recent(cfg, record["job_id"])}
 
 
-def start(cfg, folders=None, since_days=None, reconcile=False):
+def start(cfg: dict, folders: list[str] | None=None, since_days: int | None=None, reconcile: bool=False) -> dict:
     if folders is not None and (not isinstance(folders, list) or not all(isinstance(f, str) for f in folders)):
         raise ValueError("folders must be a list of paths")
     if since_days is not None and (type(since_days) is not int or not 0 <= since_days <= 36500):
@@ -171,7 +176,9 @@ def start(cfg, folders=None, since_days=None, reconcile=False):
                       options=dict(folders=folders, since_days=since_days, reconcile=reconcile),
                       cycles=0, indexed_total=0, scanned_total=0, retried_total=0,
                       known=[], complete=[], known_folders=0, completed_folders=0)
+        record["log_path"] = str(diagnostics.log_path(cfg, job_id).resolve())
         write(path, record)
+        diagnostics.append(cfg, job_id, "launch_requested")
         key_name = cfg.get("api_key_env", "OUTLOOK_RAG_API_KEY")
         env = {key: value for key, value in os.environ.items()
                if not key.startswith("OUTLOOK_RAG_") or key == key_name}
@@ -180,13 +187,15 @@ def start(cfg, folders=None, since_days=None, reconcile=False):
             launch_worker([sys.executable, "-m", "outlook_rag.app", "--config", str(snapshot_path.resolve()),
                            "_job-worker", job_id], env=env)
         except Exception as exc:
-            record.update(state="failed", error_type=type(exc).__name__, finished_at=time.time())
+            info = diagnostics.exception_info(exc)
+            diagnostics.append(cfg, job_id, "launch_failed", **info)
+            record.update(state="failed", error_type=info["error_type"], error_detail=info["error_detail"], finished_at=time.time())
             write(path, record)
             raise
         return status(cfg, job_id) | {"reused_existing_job": False}
 
 
-def cancel(cfg, job_id=None):
+def cancel(cfg: dict, job_id: str | None=None) -> dict:
     _, record = load(cfg, job_id)
     if record is None:
         return {"state": "not_started"}
@@ -196,7 +205,7 @@ def cancel(cfg, job_id=None):
     return status(cfg, record["job_id"])
 
 
-def scoped_failures(cfg, known):
+def scoped_failures(cfg: dict, known: set[str]) -> int:
     path = (Path(cfg["data_dir"]) / "metadata.sqlite").resolve()
     if not path.is_file() or not known:
         return 0
@@ -205,10 +214,12 @@ def scoped_failures(cfg, known):
                            ",".join("?" for _ in known) + ")", sorted(known)).fetchone()[0]
 
 
-def run(job_id, cfg):
+def run(job_id: str, cfg: dict) -> None:
     from . import app
     path, flag = paths(cfg, job_id)
     _, record = load(cfg, job_id)
+    if record is None:
+        raise ValueError("Sync job not found")
     claimed_worker = False
     try:
         with FileLock(root(cfg) / "worker.lock", timeout=0):
@@ -217,7 +228,10 @@ def run(job_id, cfg):
             app.api_key(cfg)
             record.update(state="running", pid=os.getpid(), updated_at=time.time())
             write(path, record)
+            diagnostics.append(cfg, job_id, "worker_started", pid=os.getpid())
             known, complete = set(record["known"]), set(record["complete"])
+            known_sources = dict(record.get("known_sources", {}))
+            complete_sources = set(record.get("complete_sources", []))
             stalls = outages = 0
             while True:
                 if flag.exists():
@@ -239,23 +253,45 @@ def run(job_id, cfg):
                 record.pop("reason", None)
                 for field, source in (("indexed_total", "indexed_total"), ("scanned_total", "scanned_total"), ("retried_total", "retried")):
                     record[field] += result.get(source, 0)
-                for folder in result["folders"]:
-                    known.add(folder["folder"])
-                    if folder["window_complete"]:
-                        complete.add(folder["folder"])
-                    else:
-                        complete.discard(folder["folder"])
-                known.update(result.get("pending_folders", []))
-                record.update(known=sorted(known), complete=sorted(complete), known_folders=len(known),
-                              completed_folders=len(complete), last_cycle_ms=result.get("elapsed_ms"),
+                missing = []
+                if "target_folders" in result:
+                    current = {f["folder_id"]: f["folder"] for f in result["target_folders"]}
+                    missing = [dict(folder_id=fid, folder=name) for fid, name in sorted(known_sources.items())
+                               if fid not in current and fid not in complete_sources]
+                    known_sources.update(current)
+                    for folder in result["folders"]:
+                        fid = folder["folder_id"]
+                        if folder["window_complete"]:
+                            complete_sources.add(fid)
+                        else:
+                            complete_sources.discard(fid)
+                    known = set(known_sources.values())
+                    complete = {known_sources[fid] for fid in complete_sources}
+                    record.update(known_sources=known_sources, complete_sources=sorted(complete_sources))
+                else:
+                    # Compatibility with older/synthetic sync result records.
+                    for folder in result["folders"]:
+                        known.add(folder["folder"])
+                        if folder["window_complete"]:
+                            complete.add(folder["folder"])
+                        else:
+                            complete.discard(folder["folder"])
+                    known.update(result.get("pending_folders", []))
+                sources_done = set(known_sources) <= complete_sources if "target_folders" in result else known <= complete
+                record.update(known=sorted(known), complete=sorted(complete),
+                              known_folders=len(known_sources) if "target_folders" in result else len(known),
+                              completed_folders=len(complete_sources) if "target_folders" in result else len(complete), last_cycle_ms=result.get("elapsed_ms"),
                               stop_reason=result.get("stop_reason"),
                               discovery_errors=len(result.get("discovery_errors", [])),
-                              folder_errors=len(result.get("folder_errors", [])))
+                              folder_errors=len(result.get("folder_errors", [])) + len(missing),
+                              missing_folders=missing)
                 failed = scoped_failures(cfg, known)
                 record["failed_emails"] = failed
                 if flag.exists() or result.get("stop_reason") == "cancelled":
                     record["state"] = "cancelled"
-                elif known <= complete:
+                elif missing:
+                    record.update(state="completed_with_errors", reason="folder_unavailable")
+                elif sources_done:
                     record["state"] = "completed_with_errors" if failed or record["discovery_errors"] or record["folder_errors"] else "completed"
                 elif result.get("discovery_errors") or result.get("folder_errors"):
                     record.update(state="completed_with_errors", reason="folder_scan_error")
@@ -267,6 +303,9 @@ def run(job_id, cfg):
                     if outages >= 3 or stalls >= 3:
                         record.update(state="blocked", reason="embedding_unavailable" if outages >= 3 else "no_progress")
                 write(path, record)
+                diagnostics.append(cfg, job_id, "cycle_completed", state=record["state"], cycles=record["cycles"],
+                                   indexed_total=record["indexed_total"], scanned_total=record["scanned_total"],
+                                   failed_emails=failed, stop_reason=record.get("stop_reason"))
                 if record["state"] not in ACTIVE:
                     break
                 if result.get("stop_reason") == "embedding_unavailable":
@@ -276,6 +315,7 @@ def run(job_id, cfg):
                         time.sleep(0.1)
             record.update(updated_at=time.time(), finished_at=time.time())
             write(path, record)
+            diagnostics.append(cfg, job_id, "worker_finished", state=record["state"], reason=record.get("reason"))
     except Exception as exc:
         if isinstance(exc, Timeout) and not claimed_worker:
             owner_path = root(cfg) / "worker.owner.json"
@@ -283,5 +323,13 @@ def run(job_id, cfg):
             if owner.get("job_id") == job_id:
                 # A duplicate launch must not overwrite the active owner's job.
                 return
-        record.update(state="failed", error_type=type(exc).__name__, updated_at=time.time(), finished_at=time.time())
+        info = diagnostics.exception_info(exc)
+        diagnostics.append(cfg, job_id, "worker_failed", **info)
+        record.update(state="failed", error_type=info["error_type"], error_detail=info["error_detail"], updated_at=time.time(), finished_at=time.time())
         write(path, record)
+
+
+def prune_logs(cfg: dict) -> int:
+    owner_path = root(cfg) / "worker.owner.json"
+    owner = json.loads(owner_path.read_text(encoding="utf-8")) if worker_running(cfg) and owner_path.is_file() else {}
+    return diagnostics.prune(cfg, owner.get("job_id"))

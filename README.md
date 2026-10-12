@@ -62,7 +62,11 @@ For a smaller sync, call `sync_emails` with `{"max_total_emails": 10}`. After bu
 
 Background jobs survive MCP disconnects. Only one bulk worker runs per database; another start returns the existing job. Cancellation is cooperative, so an in-flight Outlook/API call may finish first. After a computer restart or an interrupted worker, start another job to resume saved checkpoints and cached embeddings. A `completed_with_errors` result means some mail or folders still need attention.
 
+Jobs track folders by store/folder ID. A renamed folder retains its progress and updates cached paths when scanned. If an unfinished folder disappears or its PST is disconnected, the job ends as `completed_with_errors` with `reason=folder_unavailable` and `missing_folders` identifying the affected scope.
+
 `sync_emails` remains available for small foreground updates. Its default limits are 200 mail attempts, 2,000 new metadata rows and a 30-second cooperative budget. Bulk jobs use the same settings and immediately start the next cycle when needed. While embedding requests run, sync reads ahead up to 16 additional rows on the Outlook thread. Set `OUTLOOK_RAG_SYNC_PREFETCH_EMAILS=0` to disable it.
+
+Worker status includes a local `log_path` and the last 20 diagnostic events. Logs include timestamps, progress counters, safe error codes and stack frame locations. Raw exception messages, stdout/stderr, provider bodies and credentials are not persisted. Import/configuration failures are recorded by a stdlib bootstrap before the application loads; a hard kill is still reported as interrupted. Logs are bounded to about 1 MiB per job, and maintenance removes inactive logs older than 14 days.
 
 Failures are retained for later retry and counted by `index_status`. Use `maintain_index` when you want to remove unused embedding caches and compact vector storage; recent versions are retained for seven days.
 
@@ -90,6 +94,8 @@ With an existing matching index, MCP startup, cached mail reads, index/job statu
 Use `list_sync_failures` to inspect causes and retry schedules, then pass its `mail_id` values to `retry_failed_emails(mail_ids=[...])`. The retry bypasses backoff for only those IDs; another sync owning the DB returns `busy` without changing retry state. Old failure records gain detailed causes after another attempt. Failure lists, saved progress and cached thread context remain available without the embedding API; automatic dimensions are recovered from the matching index. Provider response bodies and credentials are never stored as error details.
 
 `get_sync_progress`, `index_status` and `sync_job_status` expose per-folder indexed/failed counts, scan progress, processing rate and ETA. Remaining counts use Outlook item-count estimates, which can include non-mail items. ETA is `null` when the scope or rate is unknown, including incomplete checkpoints from older versions. A completed scan may still have failed mail to recover. These status calls use saved snapshots and make no live Outlook calls.
+
+Use `search_emails(min_similarity=0.6)` to exclude chunks below a cosine similarity threshold, including BM25-only candidates. The default is `None`, preserving relative ranking; calibrate a threshold for your model rather than interpreting the score as a confidence probability. Long chunks return a plain-text window around a query match when available.
 
 Set `search_emails(group_by_thread=true)` to keep the strongest match per store/conversation. `thread_mail_count` includes all cached mail in that conversation, even outside search filters. Call `get_mail_thread(mail_id=..., before=3, after=3)` for chronological context around a result. Empty conversation IDs remain separate emails. Context is limited to indexed mail, with bounded body output; no additional embedding request is needed.
 
@@ -129,12 +135,33 @@ uv run --frozen python -m unittest discover -s tests -p "test_*.py" -v
 
 Evaluate your own labeled search queries with `tests/evaluate_search.py`; keep real-mail labels outside the repository. Candidate count and RRF weights are configurable without rebuilding the index.
 
+Search expands its initial chunk pool when mail/thread deduplication leaves too few results, up to 5,000 candidates per source and a five-second cooperative budget checked between rounds. Results report the final `candidate_limit` and whether a count/time limit stopped expansion.
+
+The CLI exposes the same maintenance operations as MCP. Read-only cached commands and job cancellation also work without provider credentials or API access:
+
+```powershell
+uv run --frozen outlook-rag job start --folders inbox sent --since-days 30
+uv run --frozen outlook-rag job status
+uv run --frozen outlook-rag job cancel <job_id>
+uv run --frozen outlook-rag failures list --folder inbox --limit 50 --offset 0
+uv run --frozen outlook-rag failures retry <mail_id> --max-seconds 30
+uv run --frozen outlook-rag progress
+uv run --frozen outlook-rag thread <mail_id> --before 3 --after 3
+uv run --frozen outlook-rag search "shipping changes" --folder inbox --min-similarity 0.6
+```
+
+Use `outlook-rag --help`, `outlook-rag job --help` and `outlook-rag failures --help` for options. Commands return JSON; no command starts MCP stdio.
+
 The offline unit tests also run on macOS and Linux using synthetic COM imports. They do not validate a real Outlook profile or Windows worker launch; those integration checks require Windows.
 
-GitHub Actions runs the complete offline unit suite on every push and pull request, on Ubuntu 24.04 and Windows Server 2025 with Python 3.11, 3.12 and 3.13. Dependencies come from `uv.lock` via `uv sync --frozen`; the test command then runs with uv offline. CI needs no API credentials, OpenWebUI service or user mail. Windows installs the real pywin32 package, but Outlook dispatch and background worker launch remain mocked; Linux substitutes COM imports. No tests are intentionally skipped for either OS. These checks do not validate a real Outlook profile, PST/GetTable provider behavior, WMI worker survival or screen interaction.
+On Windows with Outlook Classic, run `uv run --frozen python tests/verify_outlook_metadata.py --folder inbox --max-rows 65` to compare GetArray metadata with GetNextRow on the same table. Choose a populated folder; other folder paths are accepted. This opt-in check reads only IDs/classes/timestamps and outputs counts, without email bodies, identifying values, API calls or index writes.
+
+GitHub Actions runs the complete offline unit suite on every push and pull request, on Ubuntu 24.04 and Windows Server 2025 with Python 3.11, 3.12 and 3.13. Dependencies come from `uv.lock` via `uv sync --frozen`; the test command then runs with uv offline. A separate quality job runs locked Ruff and Mypy. CI needs no API credentials, OpenWebUI service or user mail. Windows installs the real pywin32 package, but Outlook dispatch and background worker launch remain mocked; Linux substitutes COM imports. No tests are intentionally skipped for either OS. These checks do not validate a real Outlook profile, PST/GetTable provider behavior, WMI worker survival or screen interaction.
 
 To test an already configured embedding API with synthetic mail, provide its existing credentials through `OUTLOOK_RAG_API_KEY`, then run `uv run --frozen python tests/verify_live_api.py --url <embedding-endpoint> --model <model-id>`. Add `--uv <uv-executable>` to include the API/ANN and MCP integration scripts. The test uses temporary indexes and a local fault proxy to verify outage recovery without stopping your provider. No real Outlook mail is read; COM/WMI remain untested by this check.
 
 ## License
 
 [MIT](LICENSE). Dependencies and embedding models have their own licenses.
+
+Code is organized into text, Outlook adapters, search, MCP adapters, CLI and worker diagnostics modules. `app.py` retains existing public entry points and coordinates configuration, storage and sync. Windows-only imports remain deferred so cached operations work on other platforms. Source functions have annotations; COM/backend boundaries use `Any`. Ruff checks syntax, imports and correctness rules, and Mypy checks annotated source including function bodies. NumPy stubs are excluded from dependency traversal because newer stubs use Python 3.12 syntax while the source targets Python 3.11.

@@ -21,3 +21,30 @@ Issues = "https://github.com/camucamulemon7/outlook-rag/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/outlook_rag"]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19,<2",
+    "ruff>=0.15,<0.16",
+]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*.py" = ["F401", "F841"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
