@@ -95,7 +95,10 @@ def main():
         assert all(f"unique{i:05d}" in "".join(parts) for i in range(700))
         # Verify ANN construction using the configured stored vector dimensions.
         sample = table.search().limit(1).to_list()[0]["vector"]
-        table.add([{"id": f"ann-{i}", "email_id": "0" * 64, "vector": sample} for i in range(300)])
+        with app.vector_publication(sql, table):
+            table.add([{"id": f"ann-{i}", "email_id": "0" * 64, "vector": sample} for i in range(300)])
+            with sql:
+                app.publish_vectors(sql, table)
         optimized = app.optimize()
         assert optimized["indexed"] and optimized["indexes"]
         assert table.search(sample).distance_type("cosine").limit(1).to_list()

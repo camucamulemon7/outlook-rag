@@ -1,8 +1,11 @@
 """Failure recovery, durable scan progress and cached thread context."""
 from __future__ import annotations
 
+from typing import Any, Iterator
+
 import json
 import hashlib
+import logging
 import math
 import os
 import sqlite3
@@ -16,7 +19,7 @@ import httpx
 from filelock import Timeout
 
 
-def local_config():
+def local_config() -> dict:
     """Resolve a cached index without probing an unavailable embedding API."""
     from . import app
     cfg = app.config(resolve_dimensions=False)
@@ -34,18 +37,40 @@ def local_config():
     else:
         candidates = [Path(cfg["data_dir"])]
     matches = []
+    damaged = []
+    def unreadable(folder: Path, exc: Exception) -> None:
+        if not cfg.get("_automatic_data_dir"):
+            raise ValueError(f"Cannot read cached index settings ({type(exc).__name__}); repair the selected data directory.") from exc
+        damaged.append(dict(data_dir=str(folder), error_type=type(exc).__name__))
+        logging.getLogger(__name__).warning("Ignoring unreadable cached index candidate %s (%s)", folder.name, type(exc).__name__)
     for folder in candidates:
         path = folder/"metadata.sqlite"
         if path.is_file():
-            with closing(sqlite3.connect(path.resolve().as_uri()+"?mode=ro",uri=True,timeout=5)) as sql:
-                row = sql.execute("SELECT value FROM state WHERE key='embedding_identity'").fetchone()
-            saved_identities = [json.loads(row[0])] if row else []
+            try:
+                with closing(sqlite3.connect(path.resolve().as_uri()+"?mode=ro",uri=True,timeout=5)) as sql:
+                    row = sql.execute("SELECT value FROM state WHERE key='embedding_identity'").fetchone()
+                saved_identities = [json.loads(row[0])] if row else []
+            except (sqlite3.Error, OSError, ValueError, TypeError) as exc:
+                unreadable(folder, exc)
+                continue
         else:
             # A detached worker may not have created metadata.sqlite yet. Its
             # resolved, credential-free snapshot still identifies the job's index.
-            saved_identities = [json.loads(app.index_identity(json.loads(p.read_text(encoding='utf-8'))))
-                                for p in (folder/'jobs').glob('*.config.json')]
+            saved_identities = []
+            for snapshot in (folder/'jobs').glob('*.config.json'):
+                try:
+                    value = json.loads(snapshot.read_text(encoding='utf-8'))
+                    if not isinstance(value, dict) or not isinstance(value.get('model'), str):
+                        raise ValueError("Invalid job snapshot")
+                    saved_identities.append(json.loads(app.index_identity(value)))
+                except (OSError, ValueError, TypeError, KeyError) as exc:
+                    unreadable(folder, exc)
         for identity in saved_identities:
+            if not isinstance(identity, dict):
+                unreadable(folder, ValueError("Invalid saved identity"))
+                continue
+            if identity.get("model") != cfg["model"]:
+                continue
             dimensions = identity.get("dimensions")
             if type(dimensions) is not int or not 1 <= dimensions <= 65536:
                 continue
@@ -53,7 +78,13 @@ def local_config():
             if "qwen3-embedding" in cfg["model"].lower():
                 candidate.setdefault("storage_dimensions",min(1024,dimensions))
                 candidate.setdefault("embedding_request_dimensions",candidate["storage_dimensions"])
-            if json.loads(app.index_identity(candidate)) == identity:
+            try:
+                candidate_identity = json.loads(app.index_identity(candidate))
+            except (ValueError, TypeError):
+                # Valid indexes with smaller native dimensions cannot match
+                # this configured storage reduction; continue to other indexes.
+                continue
+            if candidate_identity == identity:
                 matches.append(candidate)
     identities = {app.index_identity(c) for c in matches}
     if len(identities)>1:
@@ -62,7 +93,7 @@ def local_config():
         if cfg.get("_automatic_data_dir"):
             root = Path(cfg["data_dir"]).parent
             prefix = Path(cfg["data_dir"]).name.rsplit("-",2)[0]
-            def preference(candidate):
+            def preference(candidate: Any) -> Any:
                 digest = hashlib.sha256(app.index_identity(candidate).encode()).hexdigest()[:12]
                 folder = Path(candidate["data_dir"])
                 named = root/f"{prefix}-{app.vector_dimensions(candidate)}d-{digest}"
@@ -71,11 +102,13 @@ def local_config():
         return matches[0]
     if not cfg.get("_automatic_data_dir") and (Path(cfg["data_dir"])/"metadata.sqlite").is_file():
         raise ValueError("Cached index settings do not match the configured model or chunk settings.")
+    if damaged:
+        raise ValueError("No usable cached index matches; unreadable candidates were found. Repair the index or select a valid OUTLOOK_RAG_DATA_DIR.")
     return cfg
 
 
 @contextmanager
-def stored_sql(cfg):
+def stored_sql(cfg: dict) -> Iterator[sqlite3.Connection | None]:
     path = Path(cfg["data_dir"])/"metadata.sqlite"
     if not path.is_file():
         yield None
@@ -83,16 +116,20 @@ def stored_sql(cfg):
     sql = sqlite3.connect(path.resolve().as_uri()+"?mode=ro",uri=True,timeout=5)
     sql.row_factory = sqlite3.Row
     try:
-        identity = sql.execute("SELECT value FROM state WHERE key='embedding_identity'").fetchone()
+        try:
+            identity = sql.execute("SELECT value FROM state WHERE key='embedding_identity'").fetchone()
+            saved_identity = json.loads(identity[0]) if identity else None
+        except (sqlite3.Error, ValueError, TypeError) as exc:
+            raise ValueError(f"Cannot read cached index settings ({type(exc).__name__}); repair the selected data directory.") from exc
         from . import app
-        if not identity or json.loads(identity[0]) != json.loads(app.index_identity(cfg)):
+        if saved_identity != json.loads(app.index_identity(cfg)):
             raise ValueError("Cached index settings do not match; select the matching model, dimensions and chunk settings.")
         yield sql
     finally:
         sql.close()
 
 
-def failure_reason(exc):
+def failure_reason(exc: Exception) -> str:
     # Never retain response bodies, request text, URLs, headers or credentials.
     if isinstance(exc, httpx.HTTPStatusError):
         code = exc.response.status_code
@@ -109,15 +146,15 @@ def failure_reason(exc):
     if isinstance(exc, ValueError):
         return "Invalid mail text, embedding vector, or index configuration."
     if isinstance(getattr(exc, "hresult", None), int):
-        return f"Outlook COM access failed (HRESULT {exc.hresult})."
+        return f"Outlook COM access failed (HRESULT {getattr(exc, 'hresult')})."
     if getattr(exc, "sqlite_errorname", None):
-        return f"Local database error: {exc.sqlite_errorname}."
+        return f"Local database error: {getattr(exc, 'sqlite_errorname')}."
     if isinstance(exc, PermissionError):
         return "Access denied to mail or local index files."
     return f"Mail read or index update failed ({type(exc).__name__})."
 
 
-def failures(cfg, limit=50, offset=0, folder=None):
+def failures(cfg: dict, limit: int=50, offset: int=0, folder: str | None=None) -> dict:
     from . import app
     if type(limit) is not int or not 1 <= limit <= 200 or type(offset) is not int or not 0 <= offset <= 100000:
         raise ValueError("limit must be 1..200 and offset 0..100000")
@@ -145,7 +182,7 @@ def failures(cfg, limit=50, offset=0, folder=None):
                         next_offset=offset+len(items) if offset+len(items)<total else None)
 
 
-def retry(cfg, mail_ids, max_seconds=30):
+def retry(cfg: dict, mail_ids: list[str], max_seconds: float=30) -> dict:
     from . import app
     if not isinstance(mail_ids, list) or not 1 <= len(mail_ids) <= 100 or any(not isinstance(v,str) or not re.fullmatch(r'[0-9a-f]{64}',v) for v in mail_ids):
         raise ValueError('Provide 1..100 SHA256 mail IDs from list_sync_failures.')
@@ -177,6 +214,8 @@ def retry(cfg, mail_ids, max_seconds=30):
                         metadata = dict(entry_id=old['entry_id'], modified=old['modified'], received='')
                         phase = 'outlook'
                         try:
+                            if namespace is None:
+                                raise RuntimeError("Outlook namespace unavailable")
                             item = namespace.GetItemFromID(old['entry_id'],old['store_id'])
                             metadata.update(item=item,modified=app.iso(item.LastModificationTime),received=app.iso(item.ReceivedTime))
                             mail = app.read_outlook_mail(namespace,metadata,old['store_id'],old['folder'])
@@ -205,10 +244,10 @@ def retry(cfg, mail_ids, max_seconds=30):
                 not_found_mail_ids=missing,elapsed_ms=round((time.perf_counter()-started)*1000))
 
 
-def folder_progress(sql, cfg):
+def folder_progress(sql: sqlite3.Connection, cfg: dict) -> list[dict]:
     counts = {r['folder']:r['n'] for r in sql.execute('SELECT folder,count(*) n FROM emails GROUP BY folder')}
     failed = {r['folder']:r['n'] for r in sql.execute('SELECT folder,count(*) n FROM sync_failures GROUP BY folder')}
-    latest = {}
+    latest: dict[str, dict] = {}
     for row in sql.execute("SELECT value FROM state WHERE key LIKE 'sync:%'"):
         try:
             value = json.loads(row[0])
@@ -255,13 +294,13 @@ def folder_progress(sql, cfg):
     return output
 
 
-def progress(cfg):
+def progress(cfg: dict) -> dict:
     from . import app
     with app._LOCK, stored_sql(cfg) as sql:
         return dict(folders=folder_progress(sql,cfg) if sql is not None else [],source='saved_sync_checkpoints',live_outlook_access=False)
 
 
-def thread(cfg, mail_id, before=3, after=3, max_body_chars=2000):
+def thread(cfg: dict, mail_id: str, before: int=3, after: int=3, max_body_chars: int=2000) -> dict:
     from . import app
     if not isinstance(mail_id,str) or not re.fullmatch(r'[0-9a-f]{64}',mail_id):
         raise ValueError('Invalid mail_id')
