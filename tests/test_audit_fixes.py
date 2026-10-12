@@ -248,6 +248,45 @@ class PublishedIndex(unittest.TestCase):
         self.assertEqual(stats["embedding_requests"], 0)
         self.assert_search("new", "new body")
 
+    def test_commit_time_constraint_failure_rolls_back_publication_marker(self):
+        old = self.mail()
+        app.upsert_mail(old, self.sql, self.table, self.cfg)
+        published = app.pin_vectors(self.sql, self.table)
+        self.sql.execute("PRAGMA foreign_keys=ON")
+        self.sql.executescript("""
+            CREATE TABLE commit_parent(id INTEGER PRIMARY KEY);
+            CREATE TABLE commit_child(id INTEGER REFERENCES commit_parent(id) DEFERRABLE INITIALLY DEFERRED);
+            CREATE TRIGGER fail_at_commit AFTER INSERT ON emails WHEN NEW.modified='2'
+            BEGIN INSERT INTO commit_child VALUES (999); END;
+        """)
+        statements = []
+        self.sql.set_trace_callback(statements.append)
+        with self.assertRaises(sqlite3.IntegrityError):
+            app.upsert_mail(
+                dict(old, body="new body", modified="2"), self.sql, self.table, self.cfg
+            )
+        self.sql.set_trace_callback(None)
+        self.assertTrue(
+            any(
+                "INSERT OR REPLACE INTO state VALUES ('vector_version'" in statement
+                for statement in statements
+            )
+        )
+        self.assertIn("COMMIT", statements)
+        self.assertEqual(app.pin_vectors(self.sql, self.table), published)
+        self.assertEqual(
+            self.sql.execute("SELECT count(*) FROM commit_child").fetchone()[0], 0
+        )
+        self.assert_search("new", "old body", 0.0)
+        with self.sql:
+            self.sql.execute("DROP TRIGGER fail_at_commit")
+        stats = app.upsert_mail(
+            dict(old, body="new body", modified="2"), self.sql, self.table, self.cfg
+        )
+        self.assertEqual(stats["embedding_requests"], 0)
+        self.assert_search("new", "new body")
+        self.assertEqual(self.table.count_rows(), 1)
+
     def test_process_exit_before_sql_commit_reopens_old_version_and_resumes(self):
         old = self.mail()
         app.upsert_mail(old, self.sql, self.table, self.cfg)

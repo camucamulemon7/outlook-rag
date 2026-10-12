@@ -56,10 +56,14 @@ def contextual_snippet(
     """Plain text window; never insert HTML into untrusted cached mail."""
     if len(text) <= size:
         return text
-    lowered = text.lower()
     phrases = [query.strip(), *terms]
-    matches = [lowered.find(word.lower()) for word in phrases if word.strip()]
-    positions = [position for position in matches if position >= 0]
+    # Unicode lowercasing can expand a character (e.g. İ -> i + dot).
+    # Match the original string so offsets remain valid for its slices.
+    positions = [
+        match.start()
+        for word in phrases
+        if word.strip() and (match := re.search(re.escape(word), text, re.IGNORECASE))
+    ]
     if not positions:
         return text[:size]
     position = min(positions)
@@ -120,8 +124,25 @@ def search(
                 clauses.append("substr(e.received,1,10)<=?")
                 params.append(bound)
             condition = " AND ".join(clauses) or "1=1"
+            if (
+                clauses
+                and not sql.execute(
+                    f"SELECT 1 FROM emails e WHERE {condition} LIMIT 1", params
+                ).fetchone()
+            ):
+                # An empty SQL result is already a consistent answer at this
+                # point. Nonempty filters are rechecked after embedding below.
+                return {
+                    "items": [],
+                    "count": 0,
+                    "elapsed_ms": round((time.perf_counter() - started) * 1000),
+                }
+            semantic_weight = cfg.get("semantic_weight", 1.0) if hybrid else 1.0
+            lexical_weight = cfg.get("lexical_weight", 1.0) if hybrid else 0.0
             t = time.perf_counter()
-            vector, query_cache_hit = backend.cached_query_vector(query, sql, cfg)
+            vector, query_cache_hit = [], False
+            if semantic_weight or min_similarity is not None:
+                vector, query_cache_hit = backend.cached_query_vector(query, sql, cfg)
             embedding_ms = round((time.perf_counter() - t) * 1000)
             with backend.indexed_snapshot(sql, table, cfg):
                 allowed = None
@@ -140,7 +161,7 @@ def search(
                         }
                 terms = (
                     list(dict.fromkeys(backend.tokens(query).split()))[:24]
-                    if hybrid
+                    if lexical_weight
                     else []
                 )
                 expression = " OR ".join(
@@ -151,14 +172,16 @@ def search(
                 search_deadline = time.perf_counter() + 5
                 mail_rows = {}
                 while True:
-                    vector_rows = vector_candidates(
-                        table, vector, candidate_count, allowed
+                    vector_rows = (
+                        vector_candidates(table, vector, candidate_count, allowed)
+                        if semantic_weight
+                        else []
                     )
                     scores, similarities = {}, {}
                     for rank, row in enumerate(vector_rows, 1):
-                        scores[row["id"]] = (
-                            cfg.get("semantic_weight", 1.0) if hybrid else 1.0
-                        ) / (cfg.get("rrf_k", 60) + rank)
+                        scores[row["id"]] = semantic_weight / (
+                            cfg.get("rrf_k", 60) + rank
+                        )
                         similarities[row["id"]] = 1 - float(row["_distance"])
                     lexical_rows = []
                     if expression:
@@ -169,9 +192,9 @@ def search(
                             [expression] + params + [candidate_count],
                         ).fetchall()
                         for rank, row in enumerate(lexical_rows, 1):
-                            scores[row[0]] = scores.get(row[0], 0) + cfg.get(
-                                "lexical_weight", 1.0
-                            ) / (cfg.get("rrf_k", 60) + rank)
+                            scores[row[0]] = scores.get(row[0], 0) + lexical_weight / (
+                                cfg.get("rrf_k", 60) + rank
+                            )
                     if min_similarity is not None:
                         missing = [cid for cid in scores if cid not in similarities]
                         for offset in range(0, len(missing), FILTER_BATCH):

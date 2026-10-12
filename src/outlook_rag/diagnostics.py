@@ -31,6 +31,7 @@ def exception_detail(exc: BaseException) -> str:
     ):
         return "Required module unavailable: " + exc.name + "."
     for field, label in (
+        ("wmi_return_code", "WMI process creation code"),
         ("hresult", "Outlook COM HRESULT"),
         ("winerror", "Windows error"),
         ("errno", "OS error"),

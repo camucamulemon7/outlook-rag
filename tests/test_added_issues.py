@@ -173,6 +173,76 @@ class AddedIssues(unittest.TestCase):
         tool = next(tool for tool in schemas if tool.name == "search_emails")
         self.assertIn("min_similarity", tool.inputSchema["properties"])
 
+    def test_unicode_case_expansion_keeps_snippet_offsets_in_original_text(self):
+        text = "İ" * 3000 + " cargochange " + "X" * 3000
+        snippet = search.contextual_snippet(text, "cargochange", [])
+        self.assertIn("cargochange", snippet)
+        self.assertLessEqual(len(snippet), 1802)
+
+    def test_zero_weight_sources_never_add_unmatched_results_or_provider_calls(self):
+        app.upsert_mail(self.mail(1, "cached body"), self.sql, self.table, self.cfg)
+        self.cfg.update(semantic_weight=0.0, lexical_weight=1.0)
+        self.assertEqual(app.search("notpresent")["count"], 0)
+        with patch.object(
+            app,
+            "embed",
+            side_effect=AssertionError(
+                "Disabled semantic source must not call provider"
+            ),
+        ):
+            self.assertEqual(app.search("body")["count"], 1)
+        self.cfg.update(semantic_weight=1.0, lexical_weight=0.0)
+        with patch.object(
+            app,
+            "tokens",
+            side_effect=AssertionError("Disabled lexical source must not tokenize"),
+        ):
+            self.assertEqual(app.search("query")["count"], 1)
+
+    def test_empty_metadata_filter_returns_without_query_embedding(self):
+        app.upsert_mail(self.mail(1), self.sql, self.table, self.cfg)
+        with patch.object(
+            app,
+            "embed",
+            side_effect=AssertionError("Empty filtered index needs no provider"),
+        ):
+            self.assertEqual(app.search("unseen", folder="absent")["count"], 0)
+
+    def test_wmi_return_code_is_retained_in_safe_launch_diagnostics(self):
+        arguments = SimpleNamespace()
+        startup = SimpleNamespace()
+        process = SimpleNamespace(
+            Methods_=lambda _: SimpleNamespace(
+                InParameters=SimpleNamespace(SpawnInstance_=lambda: arguments)
+            ),
+            ExecMethod_=lambda *_: SimpleNamespace(ReturnValue=9),
+        )
+        wmi = SimpleNamespace(
+            Get=lambda name: (
+                SimpleNamespace(SpawnInstance_=lambda: startup)
+                if name == "Win32_ProcessStartup"
+                else process
+            )
+        )
+        platform = SimpleNamespace(
+            name="nt",
+            urandom=lambda _: b"x" * 32,
+            environ=os.environ,
+            replace=os.replace,
+        )
+        with (
+            patch.dict(os.environ, {"OUTLOOK_RAG_API_KEY": "fixture-secret"}),
+            patch.object(jobs, "os", platform),
+            patch("win32com.client.GetObject", return_value=wmi, create=True),
+        ):
+            with self.assertRaises(OSError):
+                jobs.start(self.cfg)
+        state = jobs.status(self.cfg)
+        self.assertEqual(state["state"], "failed")
+        self.assertIn("WMI", state["error_detail"])
+        self.assertIn("9", state["error_detail"])
+        self.assertNotIn("fixture-secret", json.dumps(state))
+
     def test_worker_failure_retains_safe_stack_and_recent_log(self):
         job_id = self.start()
         with (

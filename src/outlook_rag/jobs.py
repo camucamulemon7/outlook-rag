@@ -21,6 +21,14 @@ from . import diagnostics
 ACTIVE = {"starting", "running", "waiting"}
 
 
+class WmiLaunchError(OSError):
+    """Keep the public WMI result code independently of unsafe error text."""
+
+    def __init__(self, code: int) -> None:
+        super().__init__("Could not start background worker via WMI")
+        self.wmi_return_code = code
+
+
 def root(cfg: dict) -> Path:
     path = Path(cfg["data_dir"]) / "jobs"
     path.mkdir(parents=True, exist_ok=True)
@@ -102,7 +110,7 @@ def launch_worker(command: list[str], *, env: dict[str, str]) -> None:
             arguments.ProcessStartupInformation = startup
             result = process.ExecMethod_("Create", arguments)
             if result.ReturnValue:
-                raise OSError("Could not start background worker (WMI code %s)" % result.ReturnValue)
+                raise WmiLaunchError(int(result.ReturnValue))
             deadline = time.monotonic() + 10
             while True:
                 try:
