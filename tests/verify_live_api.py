@@ -85,10 +85,22 @@ async def offline_mcp(config_path, mail_id, job_id):
             await session.initialize()
             tools = await session.list_tools()
             assert len(tools.tools) == 14
+            search_tool = next(t for t in tools.tools if t.name == 'search_emails')
+            assert {'subject', 'recipient', 'cursor'} <= set(search_tool.inputSchema['properties'])
             status = payload(await session.call_tool('index_status', {}))
             assert status['emails'] == 3
             original = payload(await session.call_tool('get_indexed_mail', {'mail_id': mail_id}))
             assert original['source'] == 'local_index'
+            metadata = payload(await session.call_tool('search_emails', {
+                'query': '', 'mode': 'metadata', 'sender': 'sender0',
+                'recipient': 'recipient@', 'subject': '製品',
+            }))
+            assert metadata['count'] == 1 and metadata['embedding_ms'] == 0
+            threaded = payload(await session.call_tool('search_emails', {
+                'query': '納期が遅れる可能性がある案件', 'mode': 'thread',
+            }))
+            assert threaded['count'] > 0 and threaded['query_cache_hit']
+            assert threaded['items'][0]['thread_context']['source'] == 'original_cached_mail'
             for tool, arguments in (
                 ('list_sync_failures', {}), ('get_sync_progress', {}),
                 ('get_mail_thread', {'mail_id': mail_id}),

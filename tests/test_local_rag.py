@@ -234,6 +234,50 @@ class LocalRag(unittest.TestCase):
         )
         self.assertFalse(any("SELECT e.*" in stmt for stmt in statements))
 
+    def test_lexical_limit_is_applied_after_date_and_archive_filters(self):
+        self.index(
+            *[
+                self.mail(
+                    f"old-{i}", body="needle " * 20,
+                    folder="archive", received="2008-06-01",
+                )
+                for i in range(110)
+            ],
+            self.mail("inbox", body="needle " * 20),
+            self.mail("weak", folder="archive", body="needle unrelated words"),
+            self.mail("strong", folder="archive", body="needle " * 10),
+        )
+        result = app.search(
+            "needle", mode="lexical", folder="archive",
+            since="2026-01-01", until="2026-12-31", limit=2,
+        )
+        self.assertEqual(
+            [row["entry_id"] for row in result["items"]], ["strong", "weak"]
+        )
+        # The default search still reaches the older archive without dates.
+        all_dates = app.search("needle", mode="lexical", limit=50)
+        self.assertTrue(any(row["received"] == "2008-06-01" for row in all_dates["items"]))
+
+    def test_lexical_bm25_survives_custom_fts_rank_and_orphan_rows(self):
+        self.index(
+            self.mail("weak", body="needle unrelated words"),
+            self.mail("strong", body="needle " * 10),
+            self.mail("noise", body="unrelated words"),
+        )
+        with self.sql:
+            # An old/custom FTS rank mapping must not change the search scorer.
+            self.sql.execute(
+                "INSERT INTO lexical(lexical,rank) VALUES ('rank','bm25(99.0,0.0)')"
+            )
+            self.sql.executemany(
+                "INSERT INTO lexical VALUES (?,?)",
+                [(f"orphan-{i}", "needle " * 30) for i in range(110)],
+            )
+        result = app.search("needle", mode="lexical", limit=2)
+        self.assertEqual(
+            [row["entry_id"] for row in result["items"]], ["strong", "weak"]
+        )
+
     def test_rebuild_migrates_legacy_schema_and_repairs_lexical_without_api(self):
         target = self.mail("target", body="予約 HT-5639")
         self.index(target)

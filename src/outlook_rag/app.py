@@ -24,7 +24,7 @@ from lancedb.index import IvfHnswFlat
 from filelock import FileLock
 from mcp.server.fastmcp import FastMCP
 
-from . import cli, coverage, jobs, search as search_engine, server, storage
+from . import cli, coverage, jobs, search as search_engine, server, storage, threads
 from .features import local_config, stored_sql, folder_progress, failure_reason
 from .outlook import (
     safe_attr as safe_attr,
@@ -144,7 +144,7 @@ def config(*, resolve_dimensions: bool = True) -> dict:
     cfg.setdefault("lexical_weight", 1.0)
     cfg.setdefault("search_mode", "hybrid")
     cfg.setdefault("search_exact", False)
-    if cfg["search_mode"] not in {"semantic", "hybrid", "lexical", "auto", "identifier"}:
+    if cfg["search_mode"] not in {"semantic", "hybrid", "lexical", "auto", "identifier", "metadata", "thread"}:
         raise ValueError("Invalid search_mode")
     if type(cfg["search_exact"]) is not bool:
         raise ValueError("search_exact must be a boolean")
@@ -187,8 +187,8 @@ def config(*, resolve_dimensions: bool = True) -> dict:
         if not cfg.get(field):
             raise ValueError(f"Configuration requires {field}.")
     cfg.setdefault("text_cleaning_version", 2)
-    if cfg["text_cleaning_version"] not in (1, 2):
-        raise ValueError("text_cleaning_version must be 1 or 2")
+    if cfg["text_cleaning_version"] not in (1, 2, 3):
+        raise ValueError("text_cleaning_version must be 1, 2 or 3")
     for field, default, maximum in (("embedding_batch_size", 8, 128), ("embedding_concurrent_requests", 2, 8), ("sync_batch_emails", 16, 256)):
         cfg.setdefault(field, default)
         if not isinstance(cfg[field], int) or not 1 <= cfg[field] <= maximum:
@@ -427,6 +427,7 @@ def open_store(cfg: dict) -> tuple[sqlite3.Connection, Any]:
     sql.execute("""CREATE TRIGGER IF NOT EXISTS remove_sync_failure_details AFTER DELETE ON sync_failures
         BEGIN DELETE FROM sync_failure_details WHERE mail_id=OLD.mail_id; END""")
     sql.execute("CREATE INDEX IF NOT EXISTS emails_conversation_order ON emails(store_id,conversation_id,received,id)")
+    threads.initialize(sql)
     # Refuse a model/configuration mismatch rather than mixing embedding spaces.
     identity = index_identity(cfg)
     previous = sql.execute("SELECT value FROM state WHERE key='embedding_identity'").fetchone()
@@ -650,6 +651,7 @@ def upsert_mails(mails: list[dict], sql: sqlite3.Connection, table: Any, cfg: di
         stats["vector_write_ms"] = round((time.perf_counter() - stage) * 1000)
         stage = time.perf_counter()
         with sql:
+            affected_threads = threads.previous(sql, [mail["id"] for mail in mails])
             for mail_id in changed:
                 old = sql.execute("SELECT id FROM chunks WHERE email_id=?", (mail_id,)).fetchall()
                 sql.executemany("DELETE FROM lexical WHERE chunk_id=?", [(row[0],) for row in old])
@@ -662,6 +664,10 @@ def upsert_mails(mails: list[dict], sql: sqlite3.Connection, table: Any, cfg: di
             sql.executemany("INSERT OR REPLACE INTO emails VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                             [tuple(mail.get(column, "") for column in columns) + (datetime.now(timezone.utc).isoformat(),) for mail in mails])
             sql.executemany("DELETE FROM embedding_pending WHERE email_id=?", [(mail["id"],) for mail in mails])
+            affected_threads.update(threads.identity(mail) for mail in mails)
+            thread_started = time.perf_counter()
+            stats["threads_updated"] = threads.refresh(sql, affected_threads, cfg)
+            stats["thread_update_ms"] = round((time.perf_counter()-thread_started)*1000)
             publish_vectors(sql, table)
     stats["sql_write_ms"] = round((time.perf_counter() - stage) * 1000)
     return stats
@@ -1050,12 +1056,16 @@ def remove_mail(mail_id: str, sql: sqlite3.Connection, table: Any) -> None:
     with vector_publication(sql, table):
         table.delete(f"email_id = '{mail_id}'")
         with sql:
+            affected_threads = threads.previous(sql, [mail_id]) if threads.available(sql) else set()
             ids = sql.execute("SELECT id FROM chunks WHERE email_id=?", (mail_id,)).fetchall()
             sql.executemany("DELETE FROM lexical WHERE chunk_id=?", [(row[0],) for row in ids])
             sql.executemany("DELETE FROM identifiers WHERE chunk_id=?", [(row[0],) for row in ids])
             sql.execute("DELETE FROM chunks WHERE email_id=?", (mail_id,))
             sql.execute("DELETE FROM emails WHERE id=?", (mail_id,))
             sql.execute("DELETE FROM embedding_pending WHERE email_id=?", (mail_id,))
+            if affected_threads:
+                identity = json.loads(sql.execute("SELECT value FROM state WHERE key='embedding_identity'").fetchone()[0])
+                threads.refresh(sql, affected_threads, {"text_cleaning_version": identity.get("chunk_version", 2)})
             publish_vectors(sql, table)
 
 def cached_query_vector(query: str, sql: sqlite3.Connection, cfg: dict) -> tuple[list[float], bool]:
@@ -1089,9 +1099,11 @@ def cache_query(sql: sqlite3.Connection, statement: str, values: tuple, size: in
 
 def search(query: str, limit: int = 10, folder: str | None = None, sender: str | None = None,
            since: str | None = None, until: str | None = None, hybrid: bool = True, group_by_thread: bool = False,
-           min_similarity: float | None = None, mode: str | None = None) -> dict:
+           min_similarity: float | None = None, mode: str | None = None, *,
+           subject: str | None = None, recipient: str | None = None, cursor: str | None = None) -> dict:
     return search_engine.search(sys.modules[__name__], query, limit, folder, sender, since, until,
-                                hybrid, group_by_thread, min_similarity, mode)
+                                hybrid, group_by_thread, min_similarity, mode,
+                                subject=subject, recipient=recipient, cursor=cursor)
 
 def status() -> dict:
     cfg = local_config()
@@ -1115,6 +1127,7 @@ def status() -> dict:
                     "embedding_batch_size": cfg["embedding_batch_size"], "embedding_concurrent_requests": cfg["embedding_concurrent_requests"], "sync_batch_emails": cfg["sync_batch_emails"], "sync_prefetch_emails": cfg.get("sync_prefetch_emails", 16),
                     "vector_rows": table.count_rows(), "vector_indexes": [str(index) for index in table.list_indices()],
                     "vector_coverage": storage.vector_status(table), "vector_metadata_filters": storage.metadata_ready(sql, table),
+                    "thread_index": threads.status(sql),
                     "folders": [dict(row) for row in sql.execute("SELECT folder, count(*) AS emails, max(indexed_at) AS last_indexed FROM emails GROUP BY folder")],
                     "sync_windows": [window for row in sql.execute("SELECT value FROM state WHERE key LIKE 'sync:%'")
                                      if (window := json.loads(row[0])) and (cfg.get("folders") == "auto" or window.get("folder") in cfg["folders"])],

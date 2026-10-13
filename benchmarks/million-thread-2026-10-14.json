@@ -1,0 +1,319 @@
+{
+  "emails": 1000000,
+  "chunks": 5000000,
+  "data": "synthetic text and random document vectors; latency only, no relevance claim",
+  "baseline": "427ee3d",
+  "thread_documents": 100000,
+  "vector_coverage": {
+    "search": "ann",
+    "indexed_rows": 5000000,
+    "unindexed_rows": 0,
+    "index_type": "IVF_HNSW_FLAT"
+  },
+  "thread_build": {
+    "threads": 100000,
+    "embedding_requests": 0,
+    "summary_model_requests": 0,
+    "elapsed_ms": 59038
+  },
+  "cache": "query embeddings primed; OS cache retained; SQL/Lance handles reopened",
+  "pipeline": {
+    "all": {
+      "baseline_hybrid": {
+        "median_ms": 2954.7799999999997,
+        "max_ms": 7507.7,
+        "samples": [
+          {
+            "query": "project meeting",
+            "ms": 6461.13,
+            "count": 10
+          },
+          {
+            "query": "rare",
+            "ms": 727.34,
+            "count": 10
+          },
+          {
+            "query": "delivery budget",
+            "ms": 7507.7,
+            "count": 10
+          },
+          {
+            "query": "project meeting",
+            "ms": 2776.77,
+            "count": 10
+          },
+          {
+            "query": "rare",
+            "ms": 2261.15,
+            "count": 10
+          },
+          {
+            "query": "delivery budget",
+            "ms": 3132.79,
+            "count": 10
+          }
+        ]
+      },
+      "current_hybrid": {
+        "median_ms": 2951.475,
+        "max_ms": 4383.73,
+        "samples": [
+          {
+            "query": "project meeting",
+            "ms": 4383.73,
+            "count": 10
+          },
+          {
+            "query": "rare",
+            "ms": 869.57,
+            "count": 10
+          },
+          {
+            "query": "delivery budget",
+            "ms": 3063.41,
+            "count": 10
+          },
+          {
+            "query": "project meeting",
+            "ms": 4038.75,
+            "count": 10
+          },
+          {
+            "query": "rare",
+            "ms": 710.78,
+            "count": 10
+          },
+          {
+            "query": "delivery budget",
+            "ms": 2839.54,
+            "count": 10
+          }
+        ]
+      },
+      "current_thread": {
+        "median_ms": 3260.4300000000003,
+        "max_ms": 5001.32,
+        "samples": [
+          {
+            "query": "project meeting",
+            "ms": 5001.32,
+            "count": 10
+          },
+          {
+            "query": "rare",
+            "ms": 1338.15,
+            "count": 10
+          },
+          {
+            "query": "delivery budget",
+            "ms": 2805.04,
+            "count": 10
+          },
+          {
+            "query": "project meeting",
+            "ms": 3715.82,
+            "count": 10
+          },
+          {
+            "query": "rare",
+            "ms": 589.32,
+            "count": 10
+          },
+          {
+            "query": "delivery budget",
+            "ms": 4454.62,
+            "count": 10
+          }
+        ]
+      },
+      "current_metadata": {
+        "median_ms": 1.915,
+        "max_ms": 8.7,
+        "samples": [
+          {
+            "query": "project meeting",
+            "ms": 1.9,
+            "count": 10
+          },
+          {
+            "query": "rare",
+            "ms": 0.44,
+            "count": 10
+          },
+          {
+            "query": "delivery budget",
+            "ms": 2.06,
+            "count": 10
+          },
+          {
+            "query": "project meeting",
+            "ms": 0.35,
+            "count": 10
+          },
+          {
+            "query": "rare",
+            "ms": 1.93,
+            "count": 10
+          },
+          {
+            "query": "delivery budget",
+            "ms": 8.7,
+            "count": 10
+          }
+        ]
+      }
+    },
+    "recent": {
+      "baseline_hybrid": {
+        "median_ms": 6100.174999999999,
+        "max_ms": 6324.78,
+        "samples": [
+          {
+            "query": "project meeting",
+            "ms": 6324.78,
+            "count": 10
+          },
+          {
+            "query": "rare",
+            "ms": 899.13,
+            "count": 10
+          },
+          {
+            "query": "delivery budget",
+            "ms": 6112.99,
+            "count": 10
+          },
+          {
+            "query": "project meeting",
+            "ms": 6167.87,
+            "count": 10
+          },
+          {
+            "query": "rare",
+            "ms": 2533.64,
+            "count": 10
+          },
+          {
+            "query": "delivery budget",
+            "ms": 6087.36,
+            "count": 10
+          }
+        ]
+      },
+      "current_hybrid": {
+        "median_ms": 3523.13,
+        "max_ms": 4090.53,
+        "samples": [
+          {
+            "query": "project meeting",
+            "ms": 2908.02,
+            "count": 10
+          },
+          {
+            "query": "rare",
+            "ms": 4030.76,
+            "count": 10
+          },
+          {
+            "query": "delivery budget",
+            "ms": 3048.15,
+            "count": 10
+          },
+          {
+            "query": "project meeting",
+            "ms": 3691.33,
+            "count": 10
+          },
+          {
+            "query": "rare",
+            "ms": 4090.53,
+            "count": 10
+          },
+          {
+            "query": "delivery budget",
+            "ms": 3354.93,
+            "count": 10
+          }
+        ]
+      },
+      "current_thread": {
+        "median_ms": 2678.1099999999997,
+        "max_ms": 4552.43,
+        "samples": [
+          {
+            "query": "project meeting",
+            "ms": 2633.06,
+            "count": 10
+          },
+          {
+            "query": "rare",
+            "ms": 2610.16,
+            "count": 10
+          },
+          {
+            "query": "delivery budget",
+            "ms": 2723.16,
+            "count": 10
+          },
+          {
+            "query": "project meeting",
+            "ms": 3973.3,
+            "count": 10
+          },
+          {
+            "query": "rare",
+            "ms": 878.41,
+            "count": 10
+          },
+          {
+            "query": "delivery budget",
+            "ms": 4552.43,
+            "count": 10
+          }
+        ]
+      },
+      "current_metadata": {
+        "median_ms": 1.055,
+        "max_ms": 1.87,
+        "samples": [
+          {
+            "query": "project meeting",
+            "ms": 1.87,
+            "count": 10
+          },
+          {
+            "query": "rare",
+            "ms": 0.31,
+            "count": 10
+          },
+          {
+            "query": "delivery budget",
+            "ms": 1.77,
+            "count": 10
+          },
+          {
+            "query": "project meeting",
+            "ms": 0.29,
+            "count": 10
+          },
+          {
+            "query": "rare",
+            "ms": 1.7,
+            "count": 10
+          },
+          {
+            "query": "delivery budget",
+            "ms": 0.41,
+            "count": 10
+          }
+        ]
+      }
+    }
+  },
+  "vector_coverage_provenance": "Corrected from the fresh-table ann_ready statistics emitted by load(). The original comparison report inspected the stale empty handle created before table replacement; searches reopened the published 5-million-row generation. No timing samples were changed.",
+  "host": "macOS, 64 GiB RAM, SSD, Python 3.12.14, LanceDB 0.39.0",
+  "query_embedding_provider": "OpenWebUI, text-embedding-qwen3-embedding-4b, 2560 native/1024 stored dimensions",
+  "query_cases": 3,
+  "repetitions": 2
+}

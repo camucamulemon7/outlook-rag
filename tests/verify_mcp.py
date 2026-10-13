@@ -39,9 +39,13 @@ async def main():
             search_tool = next(tool for tool in tools.tools if tool.name == "search_emails")
             assert "PST archives" in search_tool.description
             assert search_tool.inputSchema["properties"]["folder"].get("default") is None
+            assert {"subject", "recipient", "cursor"} <= set(search_tool.inputSchema["properties"])
+            assert "metadata" in search_tool.description and "thread" in search_tool.description
             assert set(names) == {"search_emails", "index_status", "get_indexed_mail", "sync_emails", "optimize_index", "list_outlook_sources", "maintain_index", "start_sync_job", "sync_job_status", "cancel_sync_job", "list_sync_failures", "retry_failed_emails", "get_sync_progress", "get_mail_thread"}
             status = payload(await session.call_tool("index_status", {}))
             assert status["emails"] > 0
+            attributes = payload(await session.call_tool("search_emails", {"query": "", "mode": "metadata", "limit": 1}))
+            assert attributes["count"] == 1 and attributes["embedding_ms"] == 0
             timings = []
             for query in ("請求書と支払い期限について", "商品やサービスの購入に関するメール", "旅行の予約や移動について"):
                 start = time.perf_counter()
@@ -52,6 +56,8 @@ async def main():
                 assert all("vector" not in item for item in result["items"])
             original = payload(await session.call_tool("get_indexed_mail", {"mail_id": result["items"][0]["mail_id"], "max_body_chars": 100}))
             assert original["source"] == "local_index" and len(original["body"]) <= 100
+            threaded = payload(await session.call_tool("search_emails", {"query": query, "mode": "thread", "limit": 3}))
+            assert threaded["count"] > 0 and all("thread_context" in item for item in threaded["items"])
             report = {"mcp_handshake": "passed", "tools": names, "indexed_emails": status["emails"],
                               "indexed_chunks": status["chunks"], "queries": timings, "original_body": "passed"}
             print(json.dumps(report))

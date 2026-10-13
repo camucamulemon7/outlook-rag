@@ -311,16 +311,17 @@ def thread(cfg: dict, mail_id: str, before: int=3, after: int=3, max_body_chars:
         if sql is None:
             raise ValueError('Indexed mail not found.')
         if sql is not None:
-            columns = "id,entry_id,store_id,folder,subject,sender,recipients,received,modified,conversation_id,substr(body,1,?) AS body,length(body) AS body_length"
+            instant = "coalesce(julianday(received),0)"
+            columns = f"id,entry_id,store_id,folder,subject,sender,recipients,received,modified,conversation_id,substr(coalesce(body,''),1,?) AS body,length(coalesce(body,'')) AS body_length,{instant} AS instant"
             anchor = sql.execute(f'SELECT {columns} FROM emails WHERE id=?',(max_body_chars,mail_id)).fetchone()
             if anchor is None:
                 raise ValueError('Indexed mail not found.')
             if anchor['conversation_id']:
-                args = [anchor['store_id'],anchor['conversation_id'],anchor['received'],anchor['received'],mail_id]
-                previous_where = 'store_id=? AND conversation_id=? AND (received<? OR (received=? AND id<?))'
-                following_where = 'store_id=? AND conversation_id=? AND (received>? OR (received=? AND id>?))'
-                previous = sql.execute(f'SELECT {columns} FROM emails WHERE {previous_where} ORDER BY received DESC,id DESC LIMIT ?', [max_body_chars,*args,before]).fetchall()
-                following = sql.execute(f'SELECT {columns} FROM emails WHERE {following_where} ORDER BY received,id LIMIT ?', [max_body_chars,*args,after]).fetchall()
+                args = [anchor['store_id'],anchor['conversation_id'],anchor['instant'],mail_id]
+                previous_where = f'store_id=? AND conversation_id=? AND ({instant},id)<(?,?)'
+                following_where = f'store_id=? AND conversation_id=? AND ({instant},id)>(?,?)'
+                previous = sql.execute(f'SELECT {columns} FROM emails WHERE {previous_where} ORDER BY {instant} DESC,id DESC LIMIT ?', [max_body_chars,*args,before]).fetchall()
+                following = sql.execute(f'SELECT {columns} FROM emails WHERE {following_where} ORDER BY {instant},id LIMIT ?', [max_body_chars,*args,after]).fetchall()
                 previous_total = sql.execute('SELECT count(*) FROM emails WHERE '+previous_where,args).fetchone()[0]
                 following_total = sql.execute('SELECT count(*) FROM emails WHERE '+following_where,args).fetchone()[0]
             else:
@@ -332,7 +333,8 @@ def thread(cfg: dict, mail_id: str, before: int=3, after: int=3, max_body_chars:
                 value = dict(row)
                 keep = focus_budget if row['id']==mail_id else min(max_body_chars,budget)
                 value.update(body=value['body'][:keep],body_truncated=value.pop('body_length')>keep,
-                             position='focus' if row['id']==mail_id else 'previous' if (row['received'],row['id'])<(anchor['received'],mail_id) else 'next')
+                             position='focus' if row['id']==mail_id else 'previous' if (row['instant'],row['id'])<(anchor['instant'],mail_id) else 'next')
+                value.pop('instant')
                 if row['id']!=mail_id:
                     budget -= len(value['body'])
                 value['mail_id'] = value.pop('id')

@@ -50,8 +50,16 @@ def safe_text(value: str) -> str:
 def clean_body(body: str, version: int = 2) -> str:
     # Keep original body in SQLite. Conservative quote removal for embedding only.
     body = safe_text(body).replace("\r\n", "\n").replace("\r", "\n")
+    if version == 3:
+        cleaned = clean_body(body, 2)
+        significant = [line for line in cleaned.splitlines() if line.strip() and not re.match(
+            r"(?i)^\s*(?:From|To|Cc|Sent|Date|Subject|差出人|宛先|送信日時|件名)\s*[:：]", line
+        )]
+        # Quote-only forwards have no authored reply; keep the only copy of
+        # their facts instead of returning an empty or headers-only document.
+        return cleaned if significant else re.sub(r"(?m)^\s*> ?", "", body).strip()
     if version not in (1, 2):
-        raise ValueError("text_cleaning_version must be 1 or 2")
+        raise ValueError("text_cleaning_version must be 1, 2 or 3")
     source = body.splitlines()
     lines: list[str] = []
     for position, line in enumerate(source):
@@ -115,8 +123,12 @@ def chunks(
 ) -> list[str]:
     subject = safe_text(subject)
     text = clean_body(body, cleaning_version)
+    if cleaning_version == 3 and re.match(r"(?i)^\s*(?:fw|fwd|転送)\s*[:：]", subject):
+        text = re.sub(r"(?m)^\s*> ?", "", safe_text(body).replace("\r\n", "\n").replace("\r", "\n")).strip()
     if not text:
         return [f"Subject: {subject}"]
+    if cleaning_version == 3:
+        return [f"Subject: {subject}\n\n{part}" for part in paragraph_chunks(text, size, overlap)]
     output, start = [], 0
     while start < len(text):
         end = min(start + size, len(text))
@@ -128,4 +140,34 @@ def chunks(
         if end == len(text):
             break
         start = max(start + 1, end - overlap)
+    return output
+
+
+def paragraph_chunks(text: str, size: int, overlap: int) -> list[str]:
+    """Pack intact paragraphs; split only oversized ones, at sentence boundaries."""
+    atoms = []
+    for paragraph in re.split(r"\n\s*\n", text):
+        start = 0
+        while start < len(paragraph):
+            end = min(start + size, len(paragraph))
+            if end < len(paragraph):
+                boundaries = list(re.finditer(r"[。！？!?]|[.]\s|\n|\s+", paragraph[start + size // 2:end]))
+                if boundaries:
+                    end = start + size // 2 + boundaries[-1].end()
+            atoms.append(paragraph[start:end])
+            start = end
+    output: list[str] = []
+    current: list[str] = []
+    for atom in atoms:
+        if current and len("\n\n".join([*current, atom])) > size:
+            output.append("\n\n".join(current))
+            suffix: list[str] = []
+            for block in reversed(current):
+                if len("\n\n".join([block, *suffix])) > overlap:
+                    break
+                suffix.insert(0, block)
+            current = suffix if len("\n\n".join([*suffix, atom])) <= size else []
+        current.append(atom)
+    if current:
+        output.append("\n\n".join(current))
     return output

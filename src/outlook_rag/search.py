@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from . import coverage, storage
+from . import attributes, coverage, storage, threads
 
 FILTER_BATCH = 1000
 
@@ -114,8 +114,8 @@ def sql_filter(
 
 
 def resolve_mode(query: str, mode: str) -> tuple[str, str | None]:
-    if mode not in {"semantic", "hybrid", "lexical", "auto", "identifier"}:
-        raise ValueError("mode must be semantic, hybrid, lexical, auto or identifier")
+    if mode not in {"semantic", "hybrid", "lexical", "auto", "identifier", "metadata", "thread"}:
+        raise ValueError("mode must be semantic, hybrid, lexical, auto, identifier, metadata or thread")
     ids = storage.identifiers(query)
     if mode == "identifier" and len(ids) != 1:
         raise ValueError(
@@ -196,9 +196,13 @@ def search(
     group_by_thread: bool = False,
     min_similarity: float | None = None,
     mode: str | None = None,
+    *,
+    subject: str | None = None,
+    recipient: str | None = None,
+    cursor: str | None = None,
 ) -> dict:
-    if not query.strip() or len(query) > 4000 or not 1 <= limit <= 50:
-        raise ValueError("Provide a nonempty query (max 4000 characters), limit 1..50.")
+    if not isinstance(query, str) or len(query) > 4000 or type(limit) is not int or not 1 <= limit <= 50:
+        raise ValueError("Provide a query (max 4000 characters), limit 1..50.")
     if min_similarity is not None and (
         isinstance(min_similarity, bool)
         or not math.isfinite(min_similarity)
@@ -211,9 +215,22 @@ def search(
     selected_mode, identifier = resolve_mode(
         query, mode or (cfg.get("search_mode", "hybrid") if hybrid else "semantic")
     )
+    if selected_mode == "metadata":
+        if min_similarity is not None or group_by_thread:
+            raise ValueError("metadata mode does not use similarity or thread grouping")
+        return attributes.search(backend, cfg, query, limit, folder, sender, since, until,
+                                 subject, recipient, cursor)
+    if not query.strip():
+        raise ValueError("Provide a nonempty query except in metadata mode")
+    if any(value is not None for value in (subject, recipient, cursor)):
+        raise ValueError("subject, recipient and cursor require metadata mode")
+    if selected_mode == "thread":
+        group_by_thread = True
 
     def finish(result: dict, sql: Any = None) -> dict:
-        return coverage.search_result(result, sql, cfg, folder, since, until)
+        result = coverage.search_result(result, sql, cfg, folder, since, until)
+        result["search_scope"]["sender"] = sender
+        return result
 
     with backend._LOCK:
         if not (Path(cfg["data_dir"]) / "metadata.sqlite").is_file():
@@ -255,13 +272,13 @@ def search(
                 )
             semantic_weight = (
                 cfg.get("semantic_weight", 1.0)
-                if selected_mode == "hybrid"
-                else float(selected_mode == "semantic")
+                if selected_mode in {"hybrid", "thread"}
+                else float(selected_mode in {"semantic", "thread"})
             )
             lexical_weight = (
                 cfg.get("lexical_weight", 1.0)
-                if selected_mode == "hybrid"
-                else float(selected_mode == "lexical")
+                if selected_mode in {"hybrid", "thread"}
+                else float(selected_mode in {"lexical", "thread"})
             )
             t = time.perf_counter()
             vector, query_cache_hit = [], False
@@ -307,6 +324,7 @@ def search(
                 search_deadline = time.perf_counter() + 5
                 mail_rows: dict[str, Any] = {}
                 while True:
+                    parent_rows = []
                     vector_rows = (
                         vector_candidates(
                             table,
@@ -333,16 +351,26 @@ def search(
                         for rank, row in enumerate(lexical_rows, 1):
                             scores[row[0]] = 1 / (cfg.get("rrf_k", 60) + rank)
                     elif expression:
+                        # FTS5's ranked cursor avoids joining/sorting every hit
+                        # before LIMIT. Pin BM25 even if an old index has a
+                        # custom rank mapping; metadata filters still precede
+                        # LIMIT so eligible archive hits cannot be crowded out.
                         lexical_rows = sql.execute(
                             f"""SELECT l.chunk_id FROM lexical l JOIN chunks c ON c.id=l.chunk_id
                             JOIN emails e ON e.id=c.email_id WHERE lexical MATCH ? AND {condition}
-                            ORDER BY bm25(lexical),l.chunk_id LIMIT ?""",
+                            AND l.rank MATCH 'bm25()' ORDER BY l.rank LIMIT ?""",
                             [expression] + params + [candidate_count],
                         ).fetchall()
                         for rank, row in enumerate(lexical_rows, 1):
                             scores[row[0]] = scores.get(row[0], 0) + lexical_weight / (
                                 cfg.get("rrf_k", 60) + rank
                             )
+                    if selected_mode == "thread" and lexical_weight and not filtered:
+                        # Whole-thread text may include out-of-scope messages.
+                        # Explicit filters use only eligible message candidates.
+                        parent_rows = threads.candidates(sql, expression, candidate_count)
+                        for rank, row in enumerate(parent_rows, 1):
+                            scores[row[0]] = scores.get(row[0], 0) + lexical_weight / (cfg.get("rrf_k", 60) + rank)
                     if min_similarity is not None:
                         missing = [cid for cid in scores if cid not in similarities]
                         for offset in range(0, len(missing), FILTER_BATCH):
@@ -379,7 +407,7 @@ def search(
                         )
                         mail_rows.update((cid, None) for cid in ids)
                         mail_rows.update((row["chunk_id"], row) for row in fetched)
-                    output, seen, threads = [], set(), set()
+                    output, seen, seen_threads = [], set(), set()
                     for cid, score in sorted(
                         scores.items(), key=lambda pair: pair[1], reverse=True
                     ):
@@ -393,9 +421,9 @@ def search(
                             continue
                         seen.add(row["id"])
                         thread = (row["store_id"], row["conversation_id"] or row["id"])
-                        if group_by_thread and thread in threads:
+                        if group_by_thread and thread in seen_threads:
                             continue
-                        threads.add(thread)
+                        seen_threads.add(thread)
                         output.append(
                             {
                                 "mail_id": row["id"],
@@ -422,6 +450,7 @@ def search(
                     exhausted = (
                         len(vector_rows) < candidate_count
                         and len(lexical_rows) < candidate_count
+                        and len(parent_rows) < candidate_count
                     )
                     time_limited = time.perf_counter() >= search_deadline
                     if (
@@ -434,7 +463,7 @@ def search(
                     # More chunks from the same mail/thread must not hide the
                     # next distinct result. Recompute RRF using the larger pool.
                     candidate_count = min(candidate_cap, candidate_count * 2)
-                if group_by_thread:
+                if group_by_thread and selected_mode != "thread":
                     pairs = {
                         (row["store_id"], row["conversation_id"])
                         for row in output
@@ -456,14 +485,24 @@ def search(
                             row["thread_mail_count"] = counts.get(
                                 (row["store_id"], row["conversation_id"]), 1
                             )
+                thread_info = {}
+                if selected_mode == "thread":
+                    context_started = time.perf_counter()
+                    thread_info = dict(
+                        thread_index=threads.status(sql),
+                        thread_parent_search_used=bool(lexical_weight and not filtered and threads.available(sql)),
+                        thread_context=threads.contexts(sql, output, condition, params),
+                    )
+                    thread_info["thread_context_ms"] = round((time.perf_counter()-context_started)*1000)
                 return finish(
                     {
+                        **thread_info,
                         "query": query,
                         "count": len(output),
                         "items": output,
                         "embedding_ms": embedding_ms,
                         "elapsed_ms": round((time.perf_counter() - started) * 1000),
-                        "hybrid": selected_mode == "hybrid",
+                        "hybrid": selected_mode in {"hybrid", "thread"},
                         "search_mode": selected_mode,
                         "metadata_prefilter": native_filters,
                         "vector_search_exact": cfg.get("search_exact", False),

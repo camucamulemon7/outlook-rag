@@ -40,13 +40,13 @@ Set `OUTLOOK_RAG_EMBEDDING_URL` if your endpoint differs from the default. As an
 | OUTLOOK_RAG_RRF_K | 60 |
 | OUTLOOK_RAG_SEMANTIC_WEIGHT | 1.0 |
 | OUTLOOK_RAG_LEXICAL_WEIGHT | 1.0 |
-| OUTLOOK_RAG_SEARCH_MODE | hybrid; semantic, lexical, identifier and opt-in auto are also supported |
+| OUTLOOK_RAG_SEARCH_MODE | hybrid; semantic, lexical, identifier, auto, metadata and thread are also supported |
 | OUTLOOK_RAG_SEARCH_NPROBES | Unset: SDK default. 1..65536 partitions probed by ANN |
 | OUTLOOK_RAG_SEARCH_EF | Unset: SDK default. 1..65536 HNSW effort; raised to at least the current candidate count |
 | OUTLOOK_RAG_SEARCH_EXACT | false; true bypasses ANN for an exact cosine baseline |
 | OUTLOOK_RAG_CHUNK_SIZE | 1600 characters |
 | OUTLOOK_RAG_CHUNK_OVERLAP | 200 characters |
-| OUTLOOK_RAG_TEXT_CLEANING_VERSION | 2: enhanced text cleanup |
+| OUTLOOK_RAG_TEXT_CLEANING_VERSION | 2: enhanced text cleanup; opt-in 3 packs paragraphs and preserves recognized forwards/quote-only bodies |
 | OUTLOOK_RAG_WARMUP_ON_START | true: send a small embedding warmup request |
 | OUTLOOK_RAG_QUERY_INSTRUCTION | Default retrieval instruction for Qwen3-Embedding; empty for other models |
 | OUTLOOK_RAG_QUERY_PREFIX | Empty; set if required by your model |
@@ -80,9 +80,25 @@ Job diagnostics are stored in `<data_dir>/jobs/<job_id>.log` and exposed as `log
 
 Server-side dimension requests do not change index identity: full output is still detected as the model's native dimension, and stored dimensions remain fixed. Unsupported dimension requests fall back once per process. Only request reduced dimensions from models that support MRL.
 
-Candidate count, search mode, ANN search parameters and RRF weights do not change embedding identity or require re-indexing. Hybrid weights apply only in hybrid mode; semantic and lexical modes enable their single source with weight 1. Use a labeled query set to compare changes before selecting new defaults. `mode` in an individual search overrides `SEARCH_MODE`, and `hybrid=false` selects semantic mode when `mode` is omitted.
+Candidate count, search mode, ANN search parameters and RRF weights do not change embedding identity or require re-indexing. Hybrid weights apply in hybrid and thread modes (parent excerpts use the lexical weight); semantic and lexical modes enable their single source with weight 1. Use a labeled query set to compare changes before selecting new defaults. `mode` in an individual search overrides `SEARCH_MODE`, and `hybrid=false` selects semantic mode when `mode` is omitted.
+
+`mode="metadata"` requires no embedding or LanceDB access. It supports `query=""`, sender, inclusive dates, exact folder, literal subject and recipient substrings, and `cursor` paging. A nonempty metadata query is a literal subject substring, not a natural-language request. SQL uses ASCII case folding for substrings. Results sort by received UTC instant and mail ID descending; unknown dates sort last. Reuse `next_cursor` with identical query/filters. Pages reflect the current sync state, not a frozen multi-page snapshot; changed timestamps during sync can affect pagination. `subject`, `recipient`, `cursor` cannot be used in other modes. Similarity thresholds and thread grouping cannot be used in metadata mode.
+
+CLI metadata lists can omit the positional query: `outlook-rag search --mode metadata --sender tanaka@ --subject PCIe`. This avoids empty-string argument handling differences between PowerShell versions. Other modes require a nonempty query.
+
+`mode="thread"` combines message hybrid search with BM25 of derived thread excerpts, adds their ranks through RRF, groups by store/conversation and attaches bounded chronological original mail evidence. Filters are applied to every context query, and whole-thread excerpt retrieval is disabled whenever sender/folder/date filters are supplied. The earliest and latest eligible messages and neighbors around the matched message are included when the global 12,000-character body budget permits (1,200 characters per body, at most five sources per result). Body/selection truncation is explicit. No generated summary or fact/decision inference runs. Cached originals are evidence, so agents must verify chronological changes before asserting a final decision. `get_mail_thread` itself returns a whole-conversation window and has no search filters: check original dates/senders/folders when using it after a restricted search.
+
+Thread documents contain at most 6,000 characters: source IDs and excerpts from the latest message, first two and last twelve messages, with deduplication. They do not represent every intermediate decision in long threads. On a new index all conversations are updated incrementally with canonical SQL publication; metadata/conversation changes, moves and deletions refresh only affected owners. Unchanged fingerprints avoid rewriting FTS rows. Direct row-ID deletes avoid scanning all thread documents per update. No additional model call is required.
+
+Existing indexes start with a partial derived thread index after the first writer initializes its schema. Read-only searches do not initialize or rebuild it. Run `outlook-rag rebuild-threads` for an explicit full build from cached originals, without API credentials. The rebuild holds the existing writer lock and publishes derived rows atomically in SQLite; another writer reports busy, and failures keep the previous rows. UTC sort indexes are created once during writer initialization or this explicit rebuild. `index_status.thread_index` reports state and representation; `complete` means all cached conversations are represented, not that their entire history fits the excerpt budget. A missing index still permits message retrieval and original context. Backups include these derived tables.
+
+Text-cleaning version 3 preserves short emails as single chunks, packs whole paragraphs, and splits oversized paragraphs at sentence/space boundaries. Overlap reuses whole paragraphs only when they fit its character budget; oversized-paragraph splits do not use a hard character overlap. Recognized `Fwd:`, `Fw:` or `転送:` subjects retain forwarded originals, and a quote-only body retains its sole content. Authored replies still use conservative quote removal. Keep version 2 when compatibility is needed: v1/v2 behavior is unchanged. Version 3 changes the embedding identity and needs a full all-date/all-store sync into a new `data_dir` (or the automatic new directory). It does not migrate existing chunks in place. `rebuild-vectors` and `rebuild-threads` rebuild existing derived data, not v2-to-v3 chunking. Stop older servers before writing the upgraded index, and retain a backup.
 
 When chunk candidates collapse into too few distinct emails or threads, search doubles the pool up to 5,000 candidates per source. A five-second cooperative expansion budget is checked between rounds; a single database operation may overrun it. Results include `candidate_limit`, `candidate_cap`, `candidate_limit_reached` and `candidate_time_limit_reached`.
+
+Large-index search costs depend on chunk count, not just mail count: one million mails averaging five chunks means five million vectors. After bulk sync, use `optimize_index` (CLI `optimize`) and check `index_status.vector_coverage` for ANN and unindexed rows; newly added chunks remain searchable but are scanned until indexed. Hybrid/lexical search uses FTS5's native BM25 ranked cursor to avoid joining and sorting every match before returning the requested candidates. Equal BM25 scores follow FTS5's tie order; date/folder/sender filters are still applied before the candidate limit.
+
+Specify inclusive `since` / `until` dates when you want a narrower period, for example `search_emails(query="出張の予約", since="2025-01-01", until="2025-12-31")`. Searching a period includes indexed archives in that period. The server does not silently narrow dates to speed up searches. The expansion budget is not a wall-clock timeout for query embedding, locks or a single database operation; API and disk performance still affect total latency. Compare representative queries on the target PC before selecting a restricted scope.
 
 ## Archives and file locations
 

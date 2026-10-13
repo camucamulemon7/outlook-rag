@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from . import features, jobs, storage
+from . import features, jobs, storage, threads
 
 
 def main(backend: Any) -> None:
@@ -33,15 +33,17 @@ def main(backend: Any) -> None:
     sync_parser.add_argument("--max-seconds", type=float)
     sync_parser.add_argument("--max-scanned", type=int)
     search_parser = sub.add_parser("search")
-    search_parser.add_argument("query")
+    search_parser.add_argument("query", nargs="?", default="", help="Required except for metadata lists")
     search_parser.add_argument("--limit", type=int, default=10)
     for name in ("folder", "sender", "since", "until"):
         search_parser.add_argument("--" + name)
     search_parser.add_argument("--min-similarity", type=float)
     search_parser.add_argument("--semantic-only", action="store_true")
     search_parser.add_argument(
-        "--mode", choices=("semantic", "hybrid", "lexical", "auto", "identifier")
+        "--mode", choices=("semantic", "hybrid", "lexical", "auto", "identifier", "metadata", "thread")
     )
+    for name in ("subject", "recipient", "cursor"):
+        search_parser.add_argument("--" + name)
     search_parser.add_argument("--group-by-thread", action="store_true")
     job = sub.add_parser("job", help="Start, inspect or cancel a detached bulk sync.")
     job_sub = job.add_subparsers(dest="action", required=True)
@@ -72,6 +74,7 @@ def main(backend: Any) -> None:
     sub.add_parser("optimize")
     sub.add_parser("maintain")
     sub.add_parser("doctor", help="Check the saved index without the embedding API.")
+    sub.add_parser("rebuild-threads", help="Rebuild extractive thread documents from cached original mail; no API.")
     sub.add_parser(
         "rebuild-vectors",
         help="Rebuild search indexes using cached embeddings; no API calls.",
@@ -99,6 +102,7 @@ def main(backend: Any) -> None:
             "thread",
             "doctor",
             "rebuild-vectors",
+            "rebuild-threads",
             "backup-index",
             "restore-index",
             "optimize",
@@ -159,6 +163,7 @@ def main(backend: Any) -> None:
         )
     elif args.command == "search":
         options = {"mode": args.mode} if args.mode is not None else {}
+        options.update({name: getattr(args, name) for name in ("subject", "recipient", "cursor") if getattr(args, name) is not None})
         if args.semantic_only and args.mode is not None:
             parser.error("Choose --mode or --semantic-only")
         result = backend.search(
@@ -201,6 +206,8 @@ def main(backend: Any) -> None:
         result = storage.doctor(cfg)
     elif args.command == "rebuild-vectors":
         result = storage.rebuild_vectors(cfg)
+    elif args.command == "rebuild-threads":
+        result = threads.rebuild(cfg)
     elif args.command == "backup-index":
         result = storage.backup_index(cfg, args.destination)
     elif args.command == "restore-index":
