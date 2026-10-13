@@ -333,10 +333,14 @@ def search(
                         for rank, row in enumerate(lexical_rows, 1):
                             scores[row[0]] = 1 / (cfg.get("rrf_k", 60) + rank)
                     elif expression:
+                        # FTS5's ranked cursor avoids joining/sorting every hit
+                        # before LIMIT. Pin BM25 even if an old index has a
+                        # custom rank mapping; metadata filters still precede
+                        # LIMIT so eligible archive hits cannot be crowded out.
                         lexical_rows = sql.execute(
                             f"""SELECT l.chunk_id FROM lexical l JOIN chunks c ON c.id=l.chunk_id
                             JOIN emails e ON e.id=c.email_id WHERE lexical MATCH ? AND {condition}
-                            ORDER BY bm25(lexical),l.chunk_id LIMIT ?""",
+                            AND l.rank MATCH 'bm25()' ORDER BY l.rank LIMIT ?""",
                             [expression] + params + [candidate_count],
                         ).fetchall()
                         for rank, row in enumerate(lexical_rows, 1):

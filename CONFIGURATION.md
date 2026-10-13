@@ -84,6 +84,10 @@ Candidate count, search mode, ANN search parameters and RRF weights do not chang
 
 When chunk candidates collapse into too few distinct emails or threads, search doubles the pool up to 5,000 candidates per source. A five-second cooperative expansion budget is checked between rounds; a single database operation may overrun it. Results include `candidate_limit`, `candidate_cap`, `candidate_limit_reached` and `candidate_time_limit_reached`.
 
+Large-index search costs depend on chunk count, not just mail count: one million mails averaging five chunks means five million vectors. After bulk sync, use `optimize_index` (CLI `optimize`) and check `index_status.vector_coverage` for ANN and unindexed rows; newly added chunks remain searchable but are scanned until indexed. Hybrid/lexical search uses FTS5's native BM25 ranked cursor to avoid joining and sorting every match before returning the requested candidates. Equal BM25 scores follow FTS5's tie order; date/folder/sender filters are still applied before the candidate limit.
+
+Specify inclusive `since` / `until` dates when you want a narrower period, for example `search_emails(query="出張の予約", since="2025-01-01", until="2025-12-31")`. Searching a period includes indexed archives in that period. The server does not silently narrow dates to speed up searches. The expansion budget is not a wall-clock timeout for query embedding, locks or a single database operation; API and disk performance still affect total latency. Compare representative queries on the target PC before selecting a restricted scope.
+
 ## Archives and file locations
 
 `list_outlook_sources` returns connected store names, available PST/OST paths, and folders without reading email bodies. The equivalent CLI command is `outlook-rag sources`.
