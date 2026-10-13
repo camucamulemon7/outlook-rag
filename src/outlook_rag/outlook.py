@@ -81,14 +81,19 @@ def discover_sources(namespace: Any, cfg: dict) -> tuple[dict, list]:
             excluded.update(str(folder.EntryID) for folder in store.GetSearchFolders())
         except Exception:
             pass
+        file_path = str(safe_attr(store, "FilePath", ""))
         store_info: dict[str, Any] = {
             "name": name,
-            "file_path": str(safe_attr(store, "FilePath", "")),
+            "store_id": str(safe_attr(store, "StoreID", "")),
+            "file_path": file_path,
+            "is_pst": file_path.casefold().endswith(".pst"),
             "folders": [],
         }
         stores.append(store_info)
         try:
-            stack = [(store.GetRootFolder(), name, 0)]
+            root = store.GetRootFolder()
+            store_info["store_id"] = store_info["store_id"] or str(safe_attr(root, "StoreID", ""))
+            stack = [(root, name, 0)]
             visited = set()
             while stack:
                 folder, path, depth = stack.pop()

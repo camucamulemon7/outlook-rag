@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from . import storage
+from . import coverage, storage
 
 FILTER_BATCH = 1000
 
@@ -211,21 +211,30 @@ def search(
     selected_mode, identifier = resolve_mode(
         query, mode or (cfg.get("search_mode", "hybrid") if hybrid else "semantic")
     )
+
+    def finish(result: dict, sql: Any = None) -> dict:
+        return coverage.search_result(result, sql, cfg, folder, since, until)
+
     with backend._LOCK:
         if not (Path(cfg["data_dir"]) / "metadata.sqlite").is_file():
-            return {
-                "items": [],
-                "count": 0,
-                "note": "Index empty: run sync_emails first.",
-            }
-        sql, table = storage.open_index(cfg)
-        try:
-            if not sql.execute("SELECT 1 FROM emails LIMIT 1").fetchone():
-                return {
+            return finish(
+                {
                     "items": [],
                     "count": 0,
                     "note": "Index empty: run sync_emails first.",
                 }
+            )
+        sql, table = storage.open_index(cfg)
+        try:
+            if not sql.execute("SELECT 1 FROM emails LIMIT 1").fetchone():
+                return finish(
+                    {
+                        "items": [],
+                        "count": 0,
+                        "note": "Index empty: run sync_emails first.",
+                    },
+                    sql,
+                )
             condition, params = sql_filter(folder, sender, since, until)
             filtered = condition != "1=1"
             if (
@@ -236,11 +245,14 @@ def search(
             ):
                 # An empty SQL result is already a consistent answer at this
                 # point. Nonempty filters are rechecked after embedding below.
-                return {
-                    "items": [],
-                    "count": 0,
-                    "elapsed_ms": round((time.perf_counter() - started) * 1000),
-                }
+                return finish(
+                    {
+                        "items": [],
+                        "count": 0,
+                        "elapsed_ms": round((time.perf_counter() - started) * 1000),
+                    },
+                    sql,
+                )
             semantic_weight = (
                 cfg.get("semantic_weight", 1.0)
                 if selected_mode == "hybrid"
@@ -272,11 +284,16 @@ def search(
                         )
                     ]
                     if not allowed:
-                        return {
-                            "items": [],
-                            "count": 0,
-                            "elapsed_ms": round((time.perf_counter() - started) * 1000),
-                        }
+                        return finish(
+                            {
+                                "items": [],
+                                "count": 0,
+                                "elapsed_ms": round(
+                                    (time.perf_counter() - started) * 1000
+                                ),
+                            },
+                            sql,
+                        )
                 terms = (
                     list(dict.fromkeys(backend.tokens(query).split()))[:24]
                     if lexical_weight
@@ -439,31 +456,34 @@ def search(
                             row["thread_mail_count"] = counts.get(
                                 (row["store_id"], row["conversation_id"]), 1
                             )
-                return {
-                    "query": query,
-                    "count": len(output),
-                    "items": output,
-                    "embedding_ms": embedding_ms,
-                    "elapsed_ms": round((time.perf_counter() - started) * 1000),
-                    "hybrid": selected_mode == "hybrid",
-                    "search_mode": selected_mode,
-                    "metadata_prefilter": native_filters,
-                    "vector_search_exact": cfg.get("search_exact", False),
-                    "search_nprobes": cfg.get("search_nprobes"),
-                    "search_ef": cfg.get("search_ef"),
-                    "query_cache_hit": query_cache_hit,
-                    "min_similarity": min_similarity,
-                    "candidate_limit": candidate_count,
-                    "candidate_cap": candidate_cap,
-                    "candidate_limit_reached": len(output) < limit
-                    and not exhausted
-                    and candidate_count >= candidate_cap,
-                    "candidate_time_limit_reached": len(output) < limit
-                    and not exhausted
-                    and time_limited,
-                    "grouped_by_thread": group_by_thread,
-                    "source": "local_index",
-                    "freshness": "As of last sync; run sync_emails to refresh.",
-                }
+                return finish(
+                    {
+                        "query": query,
+                        "count": len(output),
+                        "items": output,
+                        "embedding_ms": embedding_ms,
+                        "elapsed_ms": round((time.perf_counter() - started) * 1000),
+                        "hybrid": selected_mode == "hybrid",
+                        "search_mode": selected_mode,
+                        "metadata_prefilter": native_filters,
+                        "vector_search_exact": cfg.get("search_exact", False),
+                        "search_nprobes": cfg.get("search_nprobes"),
+                        "search_ef": cfg.get("search_ef"),
+                        "query_cache_hit": query_cache_hit,
+                        "min_similarity": min_similarity,
+                        "candidate_limit": candidate_count,
+                        "candidate_cap": candidate_cap,
+                        "candidate_limit_reached": len(output) < limit
+                        and not exhausted
+                        and candidate_count >= candidate_cap,
+                        "candidate_time_limit_reached": len(output) < limit
+                        and not exhausted
+                        and time_limited,
+                        "grouped_by_thread": group_by_thread,
+                        "source": "local_index",
+                        "freshness": "As of last sync; run sync_emails to refresh.",
+                    },
+                    sql,
+                )
         finally:
             sql.close()

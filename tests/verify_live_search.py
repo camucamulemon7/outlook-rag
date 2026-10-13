@@ -129,6 +129,7 @@ def main():
             embedding_url=args.url,
             data_dir=str(root / "index"),
             warmup_on_start=False,
+            folders=["inbox"],
         )
         cfg["dimensions"] = app.detect_dimensions(cfg)
         path = root / "config.json"
@@ -160,7 +161,25 @@ def main():
                     )
                     for key, subject, body in DOCUMENTS
                 ]
+                archive = next(mail for mail in mails if mail["entry_id"] == "hotel")
+                archive.update(
+                    store_id="pst-synthetic",
+                    folder="Archive PST/2008",
+                    received="2008-06-01T12:00:00+09:00",
+                )
                 app.upsert_mails(mails, sql, table, cfg)
+                archived = app.search("札幌で泊まる宿の予約情報", mode="semantic")
+                assert archived["items"][0]["mail_id"] == archive["id"]
+                assert archived["search_scope"]["stores"] == "all_indexed_stores"
+                with patch.object(
+                    app,
+                    "embed",
+                    side_effect=AssertionError("empty folder query called API"),
+                ):
+                    inbox_only = app.search("HT-5639", folder="test", mode="identifier")
+                    assert (
+                        inbox_only["count"] == 0 and not inbox_only["absence_confirmed"]
+                    )
                 labels = [
                     dict(query=query, expected_mail_ids=[ids[key]])
                     for query, key in CASES
@@ -175,6 +194,9 @@ def main():
                     held_out_queries=8,
                     native_dimensions=cfg["dimensions"],
                     stored_dimensions=app.vector_dimensions(cfg),
+                )
+                report["archive_default_search"] = (
+                    "passed: historical PST mail retrieved despite inbox-only sync configuration"
                 )
                 report["search"] = {
                     mode: {

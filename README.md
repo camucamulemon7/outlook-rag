@@ -56,6 +56,10 @@ For offline startup, replace `@v0.8.0` with the full commit SHA shown on GitHub,
 
 1. Call `start_sync_job` for bulk indexing. It returns a `job_id` promptly and continues through bounded sync cycles in a separate process. Call `sync_job_status` to inspect progress, or `cancel_sync_job` to request a safe stop.
 2. Call `search_emails` with a natural-language query, then `get_indexed_mail` to read a result.
+
+Ordinary mail lookups should leave `folder`, `since` and `until` unset so search spans all indexed stores, including older mail in connected PST archives. An inbox-only live lookup can miss archived mail. Search responses report `search_scope` and `coverage`; zero hits do not establish absence from unindexed archives. Before answering that mail was not found, compare `index_status` with `list_outlook_sources`, which checks currently connected stores and pending PST folders without reading bodies or requesting embeddings.
+
+If archives have not been indexed, explicitly run `start_sync_job(folders=["auto"], since_days=0)` or repeat bounded `sync_emails` with the same arguments. `["auto"]` overrides an inbox-only `OUTLOOK_RAG_FOLDERS` setting and discovers all connected stores; explicit excluded/system/search folders remain excluded. `search_emails` searches existing indexed mail immediately and does not start a bulk job. An existing job can be reused, so check its `options` to confirm it covers all stores. Restart the MCP server after upgrading to reload the all-store search guidance. A client pinned to an older Git tag continues to use that tag's code.
 3. Call `sync_emails` again when you want to include new or changed mail. Sync does not run automatically.
 
 For a smaller sync, call `sync_emails` with `{"max_total_emails": 10}`. After bulk indexing, call `optimize_index` to build the vector search index.
@@ -145,6 +149,7 @@ The CLI exposes the same maintenance operations as MCP. Read-only cached command
 
 ```powershell
 uv run --frozen outlook-rag job start --folders inbox sent --since-days 30
+uv run --frozen outlook-rag job start --folders auto --since-days 0
 uv run --frozen outlook-rag job status
 uv run --frozen outlook-rag job cancel <job_id>
 uv run --frozen outlook-rag failures list --folder inbox --limit 50 --offset 0
