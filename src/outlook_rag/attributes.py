@@ -125,7 +125,7 @@ def search(
                 elapsed_ms=round((backend.time.perf_counter() - started) * 1000),
                 order="received_instant_desc_then_mail_id",
                 metadata_prefilter=True,
-                freshness="As of last sync; run sync_emails to refresh.",
+                freshness="As of last sync; use sync_index(action='start') to refresh.",
             ),
             sql,
             cfg,

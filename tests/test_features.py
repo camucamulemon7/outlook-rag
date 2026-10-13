@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import httpx
 from filelock import FileLock
-from outlook_rag import app, features, jobs
+from outlook_rag import app, features, jobs, paths
 import test_improvements as fixtures
 
 
@@ -271,6 +271,11 @@ class FunctionalFeatures(unittest.TestCase):
 
 
 class ReadablePaths(unittest.TestCase):
+    def setUp(self):
+        discovery = patch.object(paths, 'connected_pst_directories', return_value=[])
+        discovery.start()
+        self.addCleanup(discovery.stop)
+
     def test_job_snapshot_recovery_preserves_settings_and_ambiguity_guards(self):
         with tempfile.TemporaryDirectory() as root:
             env = dict(LOCALAPPDATA=str(Path(root)/'local'), OUTLOOK_RAG_MODEL='snapshot-model')
