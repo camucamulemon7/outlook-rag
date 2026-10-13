@@ -7,7 +7,6 @@ import json
 import hashlib
 import logging
 import math
-import os
 import sqlite3
 from contextlib import contextmanager, closing
 from pathlib import Path
@@ -26,8 +25,7 @@ def local_config() -> dict:
     if cfg.get("dimensions"):
         return cfg
     if cfg.get("_automatic_data_dir"):
-        roots = [Path(cfg["data_dir"]).parent,
-                 (Path(os.environ["LOCALAPPDATA"]) if os.environ.get("LOCALAPPDATA") else Path.home()/"AppData"/"Local")/"outlook-rag"]
+        roots = [Path(root) for root in cfg["_index_roots"]]
         candidates = []
         for root in roots:
             if root.is_dir():

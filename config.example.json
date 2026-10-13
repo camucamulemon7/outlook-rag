@@ -4,7 +4,6 @@
   "dimensions": 4096,
   "api_key_env": "OUTLOOK_RAG_API_KEY",
   "key_file": "./api-key.dpapi",
-  "data_dir": "./data",
   "folders": "auto",
   "embedding_batch_size": 8,
   "embedding_max_batch_chars": 24000,
@@ -15,5 +14,6 @@
   "warmup_on_start": true,
   "embedding_concurrent_requests": 2,
   "storage_dimensions": 1024,
-  "text_cleaning_version": 2
+  "text_cleaning_version": 2,
+  "mcp_tool_profile": "standard"
 }

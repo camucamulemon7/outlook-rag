@@ -163,6 +163,8 @@ def start(cfg: dict, folders: list[str] | None=None, since_days: int | None=None
     folder_selection(folders if folders is not None else cfg.get("folders", "auto"))
     if since_days is not None and (type(since_days) is not int or not 0 <= since_days <= 36500):
         raise ValueError("since_days must be 0..36500")
+    from . import paths as index_paths
+    cfg = index_paths.prepare(cfg)
     with FileLock(root(cfg) / "start.lock", timeout=1):
         _, old = load(cfg)
         if worker_running(cfg) or (old and old["state"] == "starting" and time.time() - old["updated_at"] < 60):
