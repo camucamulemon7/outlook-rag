@@ -24,11 +24,14 @@ def optimize(backend: Any) -> dict:
             count = table.count_rows()
             if count < 256:
                 return {"indexed": False, "rows": count, "note": "Small index uses exact vector search; ANN enabled from 256 chunks."}
+            partitions = cfg.get("ann_num_partitions") or max(1, min(64, count // 256))
+            if type(partitions) is not int or not 1 <= partitions <= min(4096, count // 256):
+                raise ValueError("ann_num_partitions requires at least 256 chunks per partition (maximum 4096)")
             with backend.vector_publication(sql, table):
-                table.create_index("vector", config=IvfHnswFlat(distance_type="cosine", num_partitions=max(1, min(64, count // 256))))
+                table.create_index("vector", config=IvfHnswFlat(distance_type="cosine", num_partitions=partitions))
                 with sql:
                     backend.publish_vectors(sql, table)
-            return {"indexed": True, "rows": count, "indexes": [str(index) for index in table.list_indices()]}
+            return {"indexed": True, "rows": count, "partitions": partitions, "indexes": [str(index) for index in table.list_indices()]}
         finally:
             sql.close()
 

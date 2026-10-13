@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-from . import storage, threads
+from . import storage, threads, mail_metadata
 
 def upsert_mail(backend: Any, mail: dict, sql: sqlite3.Connection, table: Any, cfg: dict) -> dict:
     return backend.upsert_mails([mail], sql, table, cfg)
@@ -40,12 +40,20 @@ def upsert_mails(backend: Any, mails: list[dict], sql: sqlite3.Connection, table
     backend.pin_vectors(sql, table)
     stage = time.perf_counter()
     changed, records = [], []
+    chunk_sources: dict[str, str] = {}
     metadata_changes = []
     unique: dict[str, str] = {}
     for mail in mails:
         if not re.fullmatch(r"[0-9a-f]{64}", mail["id"]):
             raise ValueError("Mail IDs must be SHA256 hex digests.")
         parts = backend.chunks(mail["subject"], mail["body"], cfg.get("chunk_size",1600), cfg.get("chunk_overlap",200), cleaning_version=cfg.get("text_cleaning_version", 2))
+        if cfg.get("index_attachments"):
+            for attachment in mail.get("attachments", []):
+                offset = len(parts)
+                more = backend.chunks(mail["subject"] + " / " + attachment["name"], attachment["text"], cfg.get("chunk_size",1600), cfg.get("chunk_overlap",200), cleaning_version=1)
+                for position in range(offset, offset + len(more)):
+                    chunk_sources[f"{mail['id']}:{position}"] = attachment["name"]
+                parts.extend(more)
         old_chunks = sql.execute("SELECT id,text FROM chunks WHERE email_id=? ORDER BY position", (mail["id"],)).fetchall()
         previous = [row["text"] for row in old_chunks]
         if parts == previous:
@@ -223,11 +231,17 @@ def upsert_mails(backend: Any, mails: list[dict], sql: sqlite3.Connection, table
                 sql.executemany("DELETE FROM identifiers WHERE chunk_id=?", [(row[0],) for row in old])
                 sql.execute("DELETE FROM chunks WHERE email_id=?", (mail_id,))
             sql.executemany("INSERT INTO chunks VALUES (?, ?, ?, ?)", [row[:4] for row in records])
+            sql.executemany("INSERT OR REPLACE INTO chunk_sources VALUES (?,?)", [(cid, chunk_sources[cid]) for cid, *_ in records if cid in chunk_sources])
             sql.executemany("INSERT INTO lexical VALUES (?, ?)", [(cid, cached[digest][1]) for cid, _, _, _, digest in records])
             sql.executemany("INSERT OR IGNORE INTO identifiers VALUES (?,?)", [(identifier, cid) for cid, _, _, text, _ in records for identifier in storage.identifiers(text)])
             columns = ("id", "entry_id", "store_id", "folder", "subject", "sender", "recipients", "received", "modified", "body", "conversation_id")
             sql.executemany("INSERT OR REPLACE INTO emails VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                             [tuple(mail.get(column, "") for column in columns) + (datetime.now(timezone.utc).isoformat(),) for mail in mails])
+            for mail in mails:
+                mail_metadata.save(sql, mail)
+                if cfg.get("index_attachments"):
+                    report = dict(indexed_files=len(mail.get("attachments", [])), errors=mail.get("attachment_errors", []))
+                    sql.execute("INSERT OR REPLACE INTO attachment_reports VALUES (?,?)", (mail["id"], json.dumps(report, ensure_ascii=False)))
             sql.executemany("DELETE FROM embedding_pending WHERE email_id=?", [(mail["id"],) for mail in mails])
             affected_threads.update(threads.identity(mail) for mail in mails)
             thread_started = time.perf_counter()

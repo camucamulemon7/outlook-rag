@@ -4,6 +4,8 @@ from __future__ import annotations
 from typing import Any
 
 import json
+import logging
+import math
 import os
 import re
 import sqlite3
@@ -57,13 +59,64 @@ def load(cfg: dict, job_id: str | None=None) -> tuple[Path | None, dict | None]:
         if not files:
             return None, None
         # Worker updates must not change which job an omitted ID selects.
-        records = [(p, json.loads(p.read_text(encoding="utf-8"))) for p in files]
+        records = [(p, value) for p in files if (value := read_record(p)) is not None]
+        if not records:
+            return None, None
         return max(records, key=lambda pair: (pair[1]["created_at"], pair[0].name))
     else:
         path, _ = paths(cfg, job_id)
     if not path.is_file():
         raise ValueError("Sync job not found")
-    return path, json.loads(path.read_text(encoding="utf-8"))
+    record = read_record(path)
+    if record is None:
+        raise ValueError("Sync job record is invalid")
+    return path, record
+
+
+def read_record(path: Path) -> dict | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict) or not re.fullmatch(r"[0-9a-f]{32}", value.get("job_id", "")):
+            raise ValueError()
+        if path.name != value["job_id"] + ".job.json" or value.get("state") not in ACTIVE | {"completed", "completed_with_errors", "cancelled", "failed", "blocked", "interrupted"}:
+            raise ValueError()
+        if not all(isinstance(value.get(k), (int, float)) and math.isfinite(value[k]) for k in ("created_at", "updated_at")):
+            raise ValueError()
+        if value.get("finished_at") is not None and (type(value["finished_at"]) not in (int, float) or not math.isfinite(value["finished_at"])):
+            raise ValueError()
+        return value
+    except (OSError, ValueError, TypeError):
+        logging.getLogger(__name__).warning("Ignoring an unreadable or invalid sync job record")
+        return None
+
+
+def read_owner(cfg: dict) -> dict:
+    try:
+        value = json.loads((root(cfg) / "worker.owner.json").read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def prune_records(cfg: dict, *, keep: int = 20, days: int = 14) -> int:
+    """Bound terminal history, preserving active jobs and the latest offline snapshot."""
+    records = [(p, value) for p in root(cfg).glob("*.job.json") if (value := read_record(p)) is not None]
+    records.sort(key=lambda pair: (pair[1]["created_at"], pair[0].name), reverse=True)
+    owner = read_owner(cfg) if worker_running(cfg) else {}
+    removed = terminals = 0
+    cutoff = time.time() - days * 86400
+    for position, (path, record) in enumerate(records):
+        starting = record["state"] == "starting" and time.time() - record["updated_at"] < 60
+        if starting or record["job_id"] == owner.get("job_id"):
+            continue
+        terminals += 1
+        if position == 0 or (terminals <= keep and record["updated_at"] >= cutoff):
+            continue
+        for suffix in (".config.json", ".cancel", ".log"):
+            (path.parent / (record["job_id"] + suffix)).unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
+        removed += 1
+    return removed
 
 
 def worker_running(cfg: dict) -> bool:
@@ -136,8 +189,7 @@ def status(cfg: dict, job_id: str | None=None) -> dict:
         return {"state": "not_started"}
     # A released OS lock distinguishes a crashed/exited worker from a slow COM call.
     running = worker_running(cfg)
-    owner_path = root(cfg) / "worker.owner.json"
-    owner = json.loads(owner_path.read_text(encoding="utf-8")) if running and owner_path.is_file() else {}
+    owner = read_owner(cfg) if running else {}
     owns_worker = running and owner.get("job_id") == record["job_id"]
     # The worker can publish its terminal state between the first read and the
     # lock inspection. Do not classify that completed job using a stale record.
@@ -169,6 +221,7 @@ def start(cfg: dict, folders: list[str] | None=None, since_days: int | None=None
         _, old = load(cfg)
         if worker_running(cfg) or (old and old["state"] == "starting" and time.time() - old["updated_at"] < 60):
             return status(cfg) | {"reused_existing_job": True}
+        prune_records(cfg)
         job_id = uuid.uuid4().hex
         path, _ = paths(cfg, job_id)
         snapshot_path = root(cfg) / (job_id + ".config.json")
@@ -226,7 +279,7 @@ def run(job_id: str, cfg: dict) -> None:
         raise ValueError("Sync job not found")
     claimed_worker = False
     try:
-        with FileLock(root(cfg) / "worker.lock", timeout=0):
+        with FileLock(root(cfg) / "worker.lock", timeout=3):
             claimed_worker = True
             write(root(cfg) / "worker.owner.json", {"job_id": job_id})
             app.api_key(cfg)
@@ -322,8 +375,7 @@ def run(job_id: str, cfg: dict) -> None:
             diagnostics.append(cfg, job_id, "worker_finished", state=record["state"], reason=record.get("reason"))
     except Exception as exc:
         if isinstance(exc, Timeout) and not claimed_worker:
-            owner_path = root(cfg) / "worker.owner.json"
-            owner = json.loads(owner_path.read_text(encoding="utf-8")) if owner_path.is_file() else {}
+            owner = read_owner(cfg)
             if owner.get("job_id") == job_id:
                 # A duplicate launch must not overwrite the active owner's job.
                 return
@@ -334,6 +386,6 @@ def run(job_id: str, cfg: dict) -> None:
 
 
 def prune_logs(cfg: dict) -> int:
-    owner_path = root(cfg) / "worker.owner.json"
-    owner = json.loads(owner_path.read_text(encoding="utf-8")) if worker_running(cfg) and owner_path.is_file() else {}
+    owner = read_owner(cfg) if worker_running(cfg) else {}
+    prune_records(cfg)
     return diagnostics.prune(cfg, owner.get("job_id"))

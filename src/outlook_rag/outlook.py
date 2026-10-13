@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import fnmatch
 import hashlib
 import json
 import sqlite3
+import sys
 import time
 from typing import Any, Iterator
 import uuid
@@ -19,8 +20,48 @@ def safe_attr(item: Any, name: str, default: Any = "") -> Any:
         return default
 
 
-def iso(value: Any) -> str:
-    return value.isoformat() if hasattr(value, "isoformat") else str(value or "")
+RECEIVED = "http://schemas.microsoft.com/mapi/proptag/0x0E060040"
+MODIFIED = "http://schemas.microsoft.com/mapi/proptag/0x30080040"
+
+
+def iso(value: Any, *, utc: bool = False) -> str:
+    if isinstance(value, datetime):
+        # COM DATE tzinfo is not evidence of a timezone. The property namespace
+        # determines UTC/local semantics. astimezone uses the OS rules for this date.
+        value = value.replace(tzinfo=timezone.utc if utc else None).astimezone()
+        return value.isoformat()
+    return str(value or "")
+
+
+def item_date(item: Any, name: str, property_name: str) -> str:
+    try:
+        value = item.PropertyAccessor.GetProperty(property_name)
+        if isinstance(value, datetime):
+            return iso(value, utc=True)
+    except Exception:
+        pass
+    return iso(safe_attr(item, name))
+
+
+def date_literal(value: datetime) -> str:
+    """Jet dates use the Windows user's short-date/time formats, without seconds."""
+    value = value.astimezone().replace(tzinfo=None) if value.tzinfo is not None else value
+    if sys.platform != "win32":
+        return value.strftime("%x %H:%M")  # Offline test hosts have no Outlook.
+    import ctypes
+    from ctypes import wintypes
+    class SystemTime(ctypes.Structure):
+        _fields_ = [(name, wintypes.WORD) for name in ("year", "month", "weekday", "day", "hour", "minute", "second", "milliseconds")]
+    instant = SystemTime(value.year, value.month, 0, value.day, value.hour, value.minute, 0, 0)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    parts = []
+    for function, flags, arguments in ((kernel.GetDateFormatEx, 1, (None,)), (kernel.GetTimeFormatEx, 2, ())):
+        output = ctypes.create_unicode_buffer(256)
+        function.restype = ctypes.c_int
+        if not function(None, flags, ctypes.byref(instant), None, output, len(output), *arguments):
+            raise OSError("Cannot format Outlook date using Windows regional settings")
+        parts.append(output.value)
+    return " ".join(parts).replace("'", "''")
 
 
 def same_modified(left: str, right: str) -> bool:
@@ -148,7 +189,7 @@ def mail_metadata(folder: Any, filters: list[str]) -> Iterator[tuple[dict, str]]
     try:
         table = folder.GetTable(expression)
         table.Columns.RemoveAll()
-        for name in ("EntryID", "MessageClass", "ReceivedTime", "LastModificationTime"):
+        for name in ("EntryID", "MessageClass", RECEIVED, MODIFIED):
             table.Columns.Add(name)
         table.Sort("ReceivedTime", True)
     except Exception:
@@ -171,8 +212,8 @@ def mail_metadata(folder: Any, filters: list[str]) -> Iterator[tuple[dict, str]]
                         "entry_id": str(row[0]),
                         "cursor_id": str(row[0]),
                         "mail": str(row[1]).startswith("IPM.Note"),
-                        "received": iso(row[2]),
-                        "modified": iso(row[3]),
+                        "received": iso(row[2], utc=True),
+                        "modified": iso(row[3], utc=True),
                         "item": None,
                     },
                     "GetTable",
@@ -185,8 +226,8 @@ def mail_metadata(folder: Any, filters: list[str]) -> Iterator[tuple[dict, str]]
                 {
                     "entry_id": str(item.EntryID),
                     "mail": safe_attr(item, "Class", 0) == 43,
-                    "received": iso(safe_attr(item, "ReceivedTime")),
-                    "modified": iso(safe_attr(item, "LastModificationTime")),
+                    "received": item_date(item, "ReceivedTime", RECEIVED),
+                    "modified": item_date(item, "LastModificationTime", MODIFIED),
                     "item": item,
                 },
                 "Items",
@@ -262,7 +303,8 @@ def read_outlook_mail(
         )
     except Exception:
         pass
-    return dict(
+    from .mail_metadata import read
+    result = dict(
         id=hashlib.sha256(f"{store_id}:{entry_id}".encode()).hexdigest(),
         entry_id=entry_id,
         store_id=store_id,
@@ -274,4 +316,15 @@ def read_outlook_mail(
         received=metadata["received"],
         modified=metadata["modified"],
         conversation_id=str(safe_attr(item, "ConversationID")),
+        **read(item),
     )
+    cfg = metadata.get("_attachment_cfg")
+    if cfg and cfg.get("index_attachments"):
+        from .attachments import read as read_attachments
+        try:
+            result["attachments"], result["attachment_errors"] = read_attachments(item, cfg)
+        except Exception as exc:
+            # Extraction/capture errors must never erase an otherwise readable body.
+            result["attachments"] = []
+            result["attachment_errors"] = [dict(error_type=type(exc).__name__)]
+    return result

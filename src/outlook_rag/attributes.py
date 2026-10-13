@@ -9,7 +9,7 @@ import json
 import math
 from typing import Any
 
-from . import coverage, features
+from . import coverage, features, mail_metadata
 
 INSTANT = "coalesce(julianday(e.received),0)"
 
@@ -26,25 +26,19 @@ def search(
     subject: str | None,
     recipient: str | None,
     cursor: str | None,
+    has_attachments: bool | None = None,
+    deduplicate: bool = True,
 ) -> dict:
     from .search import sql_filter
 
     started = backend.time.perf_counter()
-    condition, params = sql_filter(folder, sender, since, until)
-    for column, value in (
-        ("subject", subject),
-        ("recipients", recipient),
-        ("subject", query),
-    ):
-        if value:
-            condition += f" AND instr(lower(e.{column}),lower(?))>0"
-            params.append(value)
     signature = hashlib.sha256(
         json.dumps(
-            [query, folder, sender, since, until, subject, recipient],
+            [query, folder, sender, since, until, subject, recipient, has_attachments, deduplicate],
             ensure_ascii=False,
         ).encode()
     ).hexdigest()
+    page = None
     if cursor is not None:
         try:
             if not isinstance(cursor, str) or len(cursor) > 1000:
@@ -64,9 +58,25 @@ def search(
             raise ValueError(
                 "Invalid metadata cursor or changed search filters"
             ) from exc
-        condition += f" AND ({INSTANT}<? OR ({INSTANT}=? AND e.id<?))"
-        params.extend([page["instant"], page["instant"], page["id"]])
-    with backend._LOCK, features.stored_sql(cfg) as sql:
+    with features.stored_sql(cfg) as sql:
+        extra = sql is not None and mail_metadata.available(sql)
+        condition, params = sql_filter(folder, sender, since, until, extra=extra, recipient=recipient, has_attachments=has_attachments)
+        for value in (subject, query):
+            if value:
+                condition += " AND instr(lower(e.subject),lower(?))>0"
+                params.append(value)
+        if deduplicate and extra:
+            eligible, eligible_params = condition.replace("e.", "d."), list(params)
+            condition += f""" AND NOT EXISTS(SELECT 1 FROM mail_metadata m1
+                JOIN mail_metadata m2 ON m2.internet_message_id=m1.internet_message_id
+                JOIN emails d ON d.id=m2.email_id WHERE m1.email_id=e.id
+                AND m1.internet_message_id<>'' AND {eligible}
+                AND (coalesce(julianday(d.received),0)>{INSTANT}
+                  OR (coalesce(julianday(d.received),0)={INSTANT} AND d.id>e.id)))"""
+            params.extend(eligible_params)
+        if page is not None:
+            condition += f" AND ({INSTANT}<? OR ({INSTANT}=? AND e.id<?))"
+            params.extend([page["instant"], page["instant"], page["id"]])
         rows = (
             []
             if sql is None
@@ -98,6 +108,10 @@ def search(
             )
             for row in rows[:limit]
         ]
+        if sql is not None:
+            extras = mail_metadata.lookup(sql, [row["mail_id"] for row in items])
+            for row in items:
+                row.update(extras.get(row["mail_id"], {}))
         next_cursor = None
         if len(rows) > limit:
             last = rows[limit - 1]
@@ -125,6 +139,7 @@ def search(
                 elapsed_ms=round((backend.time.perf_counter() - started) * 1000),
                 order="received_instant_desc_then_mail_id",
                 metadata_prefilter=True,
+                deduplicate=deduplicate,
                 freshness="As of last sync; use sync_index(action='start') to refresh.",
             ),
             sql,

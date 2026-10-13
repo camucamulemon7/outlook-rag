@@ -20,6 +20,21 @@ def default_root() -> Path:
     return Path.home() / "Documents" / "Outlookファイル" / "outlook-rag"
 
 
+def fallback_root() -> Path:
+    return local_root() / "outlook-rag" / "indexes"
+
+
+def warnings(cfg: dict) -> list[str]:
+    directory = Path(cfg["data_dir"]).resolve()
+    for name in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+        value = os.environ.get(name)
+        if value and directory.is_relative_to(Path(value).expanduser().resolve()):
+            return ["Index is inside OneDrive: email text and vectors may be cloud-synced. Choose a local DATA_ROOT for new indexes or use backup/restore to relocate this index."]
+    if any(part.casefold() == "onedrive" or part.casefold().startswith("onedrive - ") for part in directory.parts):
+        return ["Index path appears to be inside OneDrive. Check folder synchronization before indexing email."]
+    return []
+
+
 def remembered_root(path: Path) -> Path | None:
     if not path.exists():
         return None
@@ -44,7 +59,7 @@ def configure(cfg: dict, config_path: Path, *, from_file: bool) -> list[Path]:
     cfg["_index_location_file"] = str(location)
     root = remembered_root(location)
     # Once chosen, a disconnected drive must not redirect reads to another DB.
-    return [root] if root is not None else [default_root(), local_root() / "outlook-rag"]
+    return [root] if root is not None else [fallback_root(), default_root(), local_root() / "outlook-rag"]
 
 
 def index_name(cfg: dict) -> tuple[str, str]:
@@ -111,7 +126,7 @@ def prepare(cfg: dict) -> dict:
     location.parent.mkdir(parents=True, exist_ok=True)
     with FileLock(str(location) + ".lock", timeout=30):
         saved = remembered_root(location)
-        roots = [saved] if saved is not None else [default_root(), local_root() / "outlook-rag"]
+        roots = [saved] if saved is not None else [fallback_root(), default_root(), local_root() / "outlook-rag"]
         selected = select(cfg, roots)
         if has_index(Path(selected["data_dir"])):
             root = Path(selected["data_dir"]).parent
@@ -121,7 +136,7 @@ def prepare(cfg: dict) -> dict:
             parents = connected_pst_directories()
             if len(parents) > 1:
                 raise ValueError("Connected PSTs are in multiple directories. Set OUTLOOK_RAG_DATA_ROOT to one directory (for example D:\\Mail\\outlook-rag), then retry. No index was created.")
-            root = parents[0] / "outlook-rag" if parents else default_root()
+            root = parents[0] / "outlook-rag" if parents else fallback_root()
         # An inaccessible remembered root must fail, never select another DB.
         root.mkdir(parents=True, exist_ok=True)
         if saved != root:

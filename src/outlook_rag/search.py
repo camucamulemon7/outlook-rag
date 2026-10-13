@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from . import attributes, coverage, storage, threads
+from . import attributes, coverage, storage, threads, mail_metadata, attachments
 
 FILTER_BATCH = 1000
 
@@ -97,15 +97,29 @@ def metadata_predicate(
 
 
 def sql_filter(
-    folder: str | None, sender: str | None, since: str | None, until: str | None
+    folder: str | None, sender: str | None, since: str | None, until: str | None,
+    *, extra: bool = False, recipient: str | None = None, has_attachments: bool | None = None,
 ) -> tuple[str, list]:
-    clauses, params = [], []
+    clauses: list[str] = []
+    params: list[Any] = []
     if folder:
-        clauses.append("e.folder=?")
-        params.append(folder)
+        pattern = folder + "*" if folder.endswith("/") else folder
+        clauses.append("lower(e.folder) GLOB lower(?)" if any(c in pattern for c in "*?[") else "e.folder=?")
+        params.append(pattern)
     if sender:
-        clauses.append("instr(lower(e.sender), lower(?)) > 0")
+        clauses.append("(instr(lower(e.sender), lower(?)) > 0" + (" OR EXISTS(SELECT 1 FROM mail_metadata m WHERE m.email_id=e.id AND instr(lower(m.sender_name),lower(?))>0))" if extra else ")"))
         params.append(sender)
+        if extra:
+            params.append(sender)
+    if recipient:
+        clauses.append("(instr(lower(e.recipients),lower(?))>0" + (" OR EXISTS(SELECT 1 FROM mail_metadata m WHERE m.email_id=e.id AND instr(lower(m.cc),lower(?))>0))" if extra else ")"))
+        params.append(recipient)
+        if extra:
+            params.append(recipient)
+    if has_attachments is not None:
+        clauses.append("EXISTS(SELECT 1 FROM mail_metadata m WHERE m.email_id=e.id AND m.has_attachments=?)" if extra else "0=1")
+        if extra:
+            params.append(int(has_attachments))
     for value, operator in ((since, ">="), (until, "<=")):
         if value:
             clauses.append("substr(e.received,1,10)" + operator + "?")
@@ -200,6 +214,8 @@ def search(
     subject: str | None = None,
     recipient: str | None = None,
     cursor: str | None = None,
+    has_attachments: bool | None = None,
+    deduplicate: bool = True,
 ) -> dict:
     if not isinstance(query, str) or len(query) > 4000 or type(limit) is not int or not 1 <= limit <= 50:
         raise ValueError("Provide a query (max 4000 characters), limit 1..50.")
@@ -212,6 +228,8 @@ def search(
     time = backend.time
     started = time.perf_counter()
     cfg = backend.local_config()
+    if type(deduplicate) is not bool or has_attachments is not None and type(has_attachments) is not bool:
+        raise ValueError("deduplicate and has_attachments must be booleans")
     selected_mode, identifier = resolve_mode(
         query, mode or (cfg.get("search_mode", "hybrid") if hybrid else "semantic")
     )
@@ -219,310 +237,324 @@ def search(
         if min_similarity is not None or group_by_thread:
             raise ValueError("metadata mode does not use similarity or thread grouping")
         return attributes.search(backend, cfg, query, limit, folder, sender, since, until,
-                                 subject, recipient, cursor)
+                                 subject, recipient, cursor, has_attachments, deduplicate)
     if not query.strip():
         raise ValueError("Provide a nonempty query except in metadata mode")
-    if any(value is not None for value in (subject, recipient, cursor)):
-        raise ValueError("subject, recipient and cursor require metadata mode")
+    if any(value is not None for value in (subject, cursor)):
+        raise ValueError("subject and cursor require metadata mode")
     if selected_mode == "thread":
         group_by_thread = True
 
     def finish(result: dict, sql: Any = None) -> dict:
         result = coverage.search_result(result, sql, cfg, folder, since, until)
-        result["search_scope"]["sender"] = sender
+        result["search_scope"].update(sender=sender, recipient=recipient, has_attachments=has_attachments, deduplicate=deduplicate)
         return result
 
-    with backend._LOCK:
-        if not (Path(cfg["data_dir"]) / "metadata.sqlite").is_file():
+    if not (Path(cfg["data_dir"]) / "metadata.sqlite").is_file():
+        return finish(
+            {
+                "items": [],
+                "count": 0,
+                "note": "Index empty: use sync_index(action='start') first.",
+            }
+        )
+    sql, table = storage.open_index(cfg)
+    try:
+        if not sql.execute("SELECT 1 FROM emails LIMIT 1").fetchone():
             return finish(
                 {
                     "items": [],
                     "count": 0,
                     "note": "Index empty: use sync_index(action='start') first.",
-                }
+                },
+                sql,
             )
-        sql, table = storage.open_index(cfg)
-        try:
-            if not sql.execute("SELECT 1 FROM emails LIMIT 1").fetchone():
-                return finish(
-                    {
-                        "items": [],
-                        "count": 0,
-                        "note": "Index empty: use sync_index(action='start') first.",
-                    },
-                    sql,
-                )
-            condition, params = sql_filter(folder, sender, since, until)
-            filtered = condition != "1=1"
-            if (
-                filtered
-                and not sql.execute(
-                    f"SELECT 1 FROM emails e WHERE {condition} LIMIT 1", params
-                ).fetchone()
-            ):
-                # An empty SQL result is already a consistent answer at this
-                # point. Nonempty filters are rechecked after embedding below.
-                return finish(
-                    {
-                        "items": [],
-                        "count": 0,
-                        "elapsed_ms": round((time.perf_counter() - started) * 1000),
-                    },
-                    sql,
-                )
-            semantic_weight = (
-                cfg.get("semantic_weight", 1.0)
-                if selected_mode in {"hybrid", "thread"}
-                else float(selected_mode in {"semantic", "thread"})
+        extra = mail_metadata.available(sql)
+        condition, params = sql_filter(folder, sender, since, until, extra=extra, recipient=recipient, has_attachments=has_attachments)
+        filtered = condition != "1=1"
+        if (
+            filtered
+            and not sql.execute(
+                f"SELECT 1 FROM emails e WHERE {condition} LIMIT 1", params
+            ).fetchone()
+        ):
+            # An empty SQL result is already a consistent answer at this
+            # point. Nonempty filters are rechecked after embedding below.
+            return finish(
+                {
+                    "items": [],
+                    "count": 0,
+                    "elapsed_ms": round((time.perf_counter() - started) * 1000),
+                },
+                sql,
             )
-            lexical_weight = (
-                cfg.get("lexical_weight", 1.0)
-                if selected_mode in {"hybrid", "thread"}
-                else float(selected_mode in {"lexical", "thread"})
+        semantic_weight = (
+            cfg.get("semantic_weight", 1.0)
+            if selected_mode in {"hybrid", "thread"}
+            else float(selected_mode in {"semantic", "thread"})
+        )
+        lexical_weight = (
+            cfg.get("lexical_weight", 1.0)
+            if selected_mode in {"hybrid", "thread"}
+            else float(selected_mode in {"lexical", "thread"})
+        )
+        t = time.perf_counter()
+        vector, query_cache_hit = [], False
+        if semantic_weight or min_similarity is not None:
+            vector, query_cache_hit = backend.cached_query_vector(query, sql, cfg)
+        embedding_ms = round((time.perf_counter() - t) * 1000)
+        with backend.indexed_snapshot(sql, table, cfg) as table:
+            allowed = None
+            name_only_matches = bool(sender and extra and sql.execute(
+                "SELECT 1 FROM mail_metadata m JOIN emails e ON e.id=m.email_id WHERE instr(lower(m.sender_name),lower(?))>0 AND instr(lower(e.sender),lower(?))=0 LIMIT 1", [sender, sender]).fetchone())
+            complex_filters = name_only_matches or recipient or has_attachments is not None or (folder and (folder.endswith("/") or any(c in folder for c in "*?[")))
+            native_filters = storage.metadata_ready(sql, table) and not bool(complex_filters)
+            predicate = (
+                metadata_predicate(folder, sender, since, until)
+                if native_filters
+                else None
             )
-            t = time.perf_counter()
-            vector, query_cache_hit = [], False
-            if semantic_weight or min_similarity is not None:
-                vector, query_cache_hit = backend.cached_query_vector(query, sql, cfg)
-            embedding_ms = round((time.perf_counter() - t) * 1000)
-            with backend.indexed_snapshot(sql, table, cfg) as table:
-                allowed = None
-                native_filters = storage.metadata_ready(sql, table)
-                predicate = (
-                    metadata_predicate(folder, sender, since, until)
-                    if native_filters
-                    else None
-                )
-                if filtered and not native_filters and semantic_weight:
-                    allowed = [
-                        row[0]
-                        for row in sql.execute(
-                            f"SELECT e.id FROM emails e WHERE {condition}", params
-                        )
-                    ]
-                    if not allowed:
-                        return finish(
-                            {
-                                "items": [],
-                                "count": 0,
-                                "elapsed_ms": round(
-                                    (time.perf_counter() - started) * 1000
-                                ),
-                            },
-                            sql,
-                        )
-                terms = (
-                    list(dict.fromkeys(backend.tokens(query).split()))[:24]
-                    if lexical_weight
+            if filtered and not native_filters and semantic_weight:
+                allowed = [
+                    row[0]
+                    for row in sql.execute(
+                        f"SELECT e.id FROM emails e WHERE {condition}", params
+                    )
+                ]
+                if not allowed:
+                    return finish(
+                        {
+                            "items": [],
+                            "count": 0,
+                            "elapsed_ms": round(
+                                (time.perf_counter() - started) * 1000
+                            ),
+                        },
+                        sql,
+                    )
+            terms = (
+                list(dict.fromkeys(backend.tokens(query).split()))[:24]
+                if lexical_weight
+                else []
+            )
+            expression = " OR ".join(
+                '"' + term.replace('"', '""') + '"' for term in terms
+            )
+            candidate_count = max(cfg.get("search_candidates", 100), limit * 10)
+            candidate_cap = 5000
+            search_deadline = time.perf_counter() + 5
+            mail_rows: dict[str, Any] = {}
+            while True:
+                parent_rows = []
+                vector_rows = (
+                    vector_candidates(
+                        table,
+                        vector,
+                        candidate_count,
+                        allowed,
+                        predicate=predicate,
+                        cfg=cfg,
+                    )
+                    if semantic_weight
                     else []
                 )
-                expression = " OR ".join(
-                    '"' + term.replace('"', '""') + '"' for term in terms
-                )
-                candidate_count = max(cfg.get("search_candidates", 100), limit * 10)
-                candidate_cap = 5000
-                search_deadline = time.perf_counter() + 5
-                mail_rows: dict[str, Any] = {}
-                while True:
-                    parent_rows = []
-                    vector_rows = (
-                        vector_candidates(
-                            table,
-                            vector,
-                            candidate_count,
-                            allowed,
-                            predicate=predicate,
-                            cfg=cfg,
-                        )
-                        if semantic_weight
-                        else []
+                scores, similarities = {}, {}
+                for rank, row in enumerate(vector_rows, 1):
+                    scores[row["id"]] = semantic_weight / (
+                        cfg.get("rrf_k", 60) + rank
                     )
-                    scores, similarities = {}, {}
-                    for rank, row in enumerate(vector_rows, 1):
-                        scores[row["id"]] = semantic_weight / (
+                    similarities[row["id"]] = 1 - float(row["_distance"])
+                lexical_rows = []
+                if identifier:
+                    lexical_rows = identifier_candidates(
+                        sql, identifier, condition, params, candidate_count
+                    )
+                    for rank, row in enumerate(lexical_rows, 1):
+                        scores[row[0]] = 1 / (cfg.get("rrf_k", 60) + rank)
+                elif expression:
+                    # FTS5's ranked cursor avoids joining/sorting every hit
+                    # before LIMIT. Pin BM25 even if an old index has a
+                    # custom rank mapping; metadata filters still precede
+                    # LIMIT so eligible archive hits cannot be crowded out.
+                    lexical_rows = sql.execute(
+                        f"""SELECT l.chunk_id FROM lexical l JOIN chunks c ON c.id=l.chunk_id
+                        JOIN emails e ON e.id=c.email_id WHERE lexical MATCH ? AND {condition}
+                        AND l.rank MATCH 'bm25()' ORDER BY l.rank LIMIT ?""",
+                        [expression] + params + [candidate_count],
+                    ).fetchall()
+                    for rank, row in enumerate(lexical_rows, 1):
+                        scores[row[0]] = scores.get(row[0], 0) + lexical_weight / (
                             cfg.get("rrf_k", 60) + rank
                         )
-                        similarities[row["id"]] = 1 - float(row["_distance"])
-                    lexical_rows = []
-                    if identifier:
-                        lexical_rows = identifier_candidates(
-                            sql, identifier, condition, params, candidate_count
-                        )
-                        for rank, row in enumerate(lexical_rows, 1):
-                            scores[row[0]] = 1 / (cfg.get("rrf_k", 60) + rank)
-                    elif expression:
-                        # FTS5's ranked cursor avoids joining/sorting every hit
-                        # before LIMIT. Pin BM25 even if an old index has a
-                        # custom rank mapping; metadata filters still precede
-                        # LIMIT so eligible archive hits cannot be crowded out.
-                        lexical_rows = sql.execute(
-                            f"""SELECT l.chunk_id FROM lexical l JOIN chunks c ON c.id=l.chunk_id
-                            JOIN emails e ON e.id=c.email_id WHERE lexical MATCH ? AND {condition}
-                            AND l.rank MATCH 'bm25()' ORDER BY l.rank LIMIT ?""",
-                            [expression] + params + [candidate_count],
-                        ).fetchall()
-                        for rank, row in enumerate(lexical_rows, 1):
-                            scores[row[0]] = scores.get(row[0], 0) + lexical_weight / (
-                                cfg.get("rrf_k", 60) + rank
-                            )
-                    if selected_mode == "thread" and lexical_weight and not filtered:
-                        # Whole-thread text may include out-of-scope messages.
-                        # Explicit filters use only eligible message candidates.
-                        parent_rows = threads.candidates(sql, expression, candidate_count)
-                        for rank, row in enumerate(parent_rows, 1):
-                            scores[row[0]] = scores.get(row[0], 0) + lexical_weight / (cfg.get("rrf_k", 60) + rank)
-                    if min_similarity is not None:
-                        missing = [cid for cid in scores if cid not in similarities]
-                        for offset in range(0, len(missing), FILTER_BATCH):
-                            ids = missing[offset : offset + FILTER_BATCH]
-                            condition_ids = id_filter("id", ids)
-                            for hit in (
-                                table.search()
-                                .where(condition_ids)
-                                .select(["id", "vector"])
-                                .limit(len(ids))
-                                .to_list()
-                            ):
-                                values = hit["vector"]
-                                norm = math.sqrt(sum(float(v) ** 2 for v in values))
-                                query_norm = math.sqrt(
-                                    sum(float(v) ** 2 for v in vector)
-                                )
-                                if norm and query_norm:
-                                    similarities[hit["id"]] = sum(
-                                        float(a) * float(b)
-                                        for a, b in zip(values, vector)
-                                    ) / (norm * query_norm)
-                    # Bound SQL round trips and avoid loading entire mail bodies.
-                    missing_rows = [cid for cid in scores if cid not in mail_rows]
-                    for offset in range(0, len(missing_rows), FILTER_BATCH):
-                        ids = missing_rows[offset : offset + FILTER_BATCH]
-                        placeholders = ",".join("?" for _ in ids)
-                        fetched = sql.execute(
-                            f"""SELECT c.id AS chunk_id,c.text AS snippet,
-                            e.id,e.entry_id,e.store_id,e.subject,e.sender,e.received,e.folder,e.conversation_id
-                            FROM chunks c JOIN emails e ON e.id=c.email_id
-                            WHERE c.id IN ({placeholders}) AND {condition}""",
-                            [*ids, *params],
-                        )
-                        mail_rows.update((cid, None) for cid in ids)
-                        mail_rows.update((row["chunk_id"], row) for row in fetched)
-                    output, seen, seen_threads = [], set(), set()
-                    for cid, score in sorted(
-                        scores.items(), key=lambda pair: pair[1], reverse=True
-                    ):
-                        if (
-                            min_similarity is not None
-                            and similarities.get(cid, -2) < min_similarity
+                if selected_mode == "thread" and lexical_weight and not filtered:
+                    # Whole-thread text may include out-of-scope messages.
+                    # Explicit filters use only eligible message candidates.
+                    parent_rows = threads.candidates(sql, expression, candidate_count)
+                    for rank, row in enumerate(parent_rows, 1):
+                        scores[row[0]] = scores.get(row[0], 0) + lexical_weight / (cfg.get("rrf_k", 60) + rank)
+                if min_similarity is not None:
+                    missing = [cid for cid in scores if cid not in similarities]
+                    for offset in range(0, len(missing), FILTER_BATCH):
+                        ids = missing[offset : offset + FILTER_BATCH]
+                        condition_ids = id_filter("id", ids)
+                        for hit in (
+                            table.search()
+                            .where(condition_ids)
+                            .select(["id", "vector"])
+                            .limit(len(ids))
+                            .to_list()
                         ):
-                            continue
-                        row = mail_rows[cid]
-                        if not row or row["id"] in seen:
-                            continue
-                        seen.add(row["id"])
-                        thread = (row["store_id"], row["conversation_id"] or row["id"])
-                        if group_by_thread and thread in seen_threads:
-                            continue
-                        seen_threads.add(thread)
-                        output.append(
-                            {
-                                "mail_id": row["id"],
-                                "entry_id": row["entry_id"],
-                                "store_id": row["store_id"],
-                                "subject": row["subject"],
-                                "sender": row["sender"],
-                                "received": row["received"],
-                                "folder": row["folder"],
-                                "conversation_id": row["conversation_id"],
-                                "snippet": contextual_snippet(
-                                    row["snippet"], query, terms
-                                ),
-                                "rank_score": round(score, 6),
-                                "semantic_similarity": round(similarities[cid], 4)
-                                if cid in similarities
-                                else None,
-                            }
-                        )
-                        if group_by_thread:
-                            output[-1]["thread_mail_count"] = 1
-                        if len(output) >= limit:
-                            break
-                    exhausted = (
-                        len(vector_rows) < candidate_count
-                        and len(lexical_rows) < candidate_count
-                        and len(parent_rows) < candidate_count
+                            values = hit["vector"]
+                            norm = math.sqrt(sum(float(v) ** 2 for v in values))
+                            query_norm = math.sqrt(
+                                sum(float(v) ** 2 for v in vector)
+                            )
+                            if norm and query_norm:
+                                similarities[hit["id"]] = sum(
+                                    float(a) * float(b)
+                                    for a, b in zip(values, vector)
+                                ) / (norm * query_norm)
+                # Bound SQL round trips and avoid loading entire mail bodies.
+                missing_rows = [cid for cid in scores if cid not in mail_rows]
+                for offset in range(0, len(missing_rows), FILTER_BATCH):
+                    ids = missing_rows[offset : offset + FILTER_BATCH]
+                    placeholders = ",".join("?" for _ in ids)
+                    fetched = sql.execute(
+                        f"""SELECT c.id AS chunk_id,c.text AS snippet,
+                        e.id,e.entry_id,e.store_id,e.subject,e.sender,e.received,e.folder,e.conversation_id
+                        FROM chunks c JOIN emails e ON e.id=c.email_id
+                        WHERE c.id IN ({placeholders}) AND {condition}""",
+                        [*ids, *params],
                     )
-                    time_limited = time.perf_counter() >= search_deadline
+                    mail_rows.update((cid, None) for cid in ids)
+                    mail_rows.update((row["chunk_id"], row) for row in fetched)
+                extras = mail_metadata.lookup(sql, list({row["id"] for row in mail_rows.values() if row}))
+                source_names = attachments.sources(sql, list(mail_rows))
+                output, seen, seen_threads, seen_message_ids = [], set(), set(), set()
+                for cid, score in sorted(
+                    scores.items(), key=lambda pair: pair[1], reverse=True
+                ):
                     if (
-                        len(output) >= limit
-                        or exhausted
-                        or candidate_count >= candidate_cap
-                        or time_limited
+                        min_similarity is not None
+                        and similarities.get(cid, -2) < min_similarity
                     ):
-                        break
-                    # More chunks from the same mail/thread must not hide the
-                    # next distinct result. Recompute RRF using the larger pool.
-                    candidate_count = min(candidate_cap, candidate_count * 2)
-                if group_by_thread and selected_mode != "thread":
-                    pairs = {
-                        (row["store_id"], row["conversation_id"])
-                        for row in output
-                        if row["conversation_id"]
-                    }
-                    if pairs:
-                        counts = {
-                            (row[0], row[1]): row[2]
-                            for row in sql.execute(
-                                "SELECT store_id,conversation_id,count(*) FROM emails WHERE "
-                                + " OR ".join(
-                                    "(store_id=? AND conversation_id=?)" for _ in pairs
-                                )
-                                + " GROUP BY store_id,conversation_id",
-                                [value for pair in pairs for value in pair],
-                            )
+                        continue
+                    row = mail_rows[cid]
+                    if not row or row["id"] in seen:
+                        continue
+                    details = extras.get(row["id"], {})
+                    message_id = details.get("internet_message_id")
+                    if deduplicate and message_id and message_id in seen_message_ids:
+                        continue
+                    if message_id:
+                        seen_message_ids.add(message_id)
+                    seen.add(row["id"])
+                    thread = (row["store_id"], row["conversation_id"] or row["id"])
+                    if group_by_thread and thread in seen_threads:
+                        continue
+                    seen_threads.add(thread)
+                    output.append(
+                        {
+                            "mail_id": row["id"],
+                            **({"attachment_name": source_names[cid]} if cid in source_names else {}),
+                            **details,
+                            "entry_id": row["entry_id"],
+                            "store_id": row["store_id"],
+                            "subject": row["subject"],
+                            "sender": row["sender"],
+                            "received": row["received"],
+                            "folder": row["folder"],
+                            "conversation_id": row["conversation_id"],
+                            "snippet": contextual_snippet(
+                                row["snippet"], query, terms
+                            ),
+                            "rank_score": round(score, 6),
+                            "semantic_similarity": round(similarities[cid], 4)
+                            if cid in similarities
+                            else None,
                         }
-                        for row in output:
-                            row["thread_mail_count"] = counts.get(
-                                (row["store_id"], row["conversation_id"]), 1
-                            )
-                thread_info = {}
-                if selected_mode == "thread":
-                    context_started = time.perf_counter()
-                    thread_info = dict(
-                        thread_index=threads.status(sql),
-                        thread_parent_search_used=bool(lexical_weight and not filtered and threads.available(sql)),
-                        thread_context=threads.contexts(sql, output, condition, params),
                     )
-                    thread_info["thread_context_ms"] = round((time.perf_counter()-context_started)*1000)
-                return finish(
-                    {
-                        **thread_info,
-                        "query": query,
-                        "count": len(output),
-                        "items": output,
-                        "embedding_ms": embedding_ms,
-                        "elapsed_ms": round((time.perf_counter() - started) * 1000),
-                        "hybrid": selected_mode in {"hybrid", "thread"},
-                        "search_mode": selected_mode,
-                        "metadata_prefilter": native_filters,
-                        "vector_search_exact": cfg.get("search_exact", False),
-                        "search_nprobes": cfg.get("search_nprobes"),
-                        "search_ef": cfg.get("search_ef"),
-                        "query_cache_hit": query_cache_hit,
-                        "min_similarity": min_similarity,
-                        "candidate_limit": candidate_count,
-                        "candidate_cap": candidate_cap,
-                        "candidate_limit_reached": len(output) < limit
-                        and not exhausted
-                        and candidate_count >= candidate_cap,
-                        "candidate_time_limit_reached": len(output) < limit
-                        and not exhausted
-                        and time_limited,
-                        "grouped_by_thread": group_by_thread,
-                        "source": "local_index",
-                        "freshness": "As of last sync; use sync_index(action='start') to refresh.",
-                    },
-                    sql,
+                    if group_by_thread:
+                        output[-1]["thread_mail_count"] = 1
+                    if len(output) >= limit:
+                        break
+                exhausted = (
+                    len(vector_rows) < candidate_count
+                    and len(lexical_rows) < candidate_count
+                    and len(parent_rows) < candidate_count
                 )
-        finally:
-            sql.close()
+                time_limited = time.perf_counter() >= search_deadline
+                if (
+                    len(output) >= limit
+                    or exhausted
+                    or candidate_count >= candidate_cap
+                    or time_limited
+                ):
+                    break
+                # More chunks from the same mail/thread must not hide the
+                # next distinct result. Recompute RRF using the larger pool.
+                candidate_count = min(candidate_cap, candidate_count * 2)
+            if group_by_thread and selected_mode != "thread":
+                pairs = {
+                    (row["store_id"], row["conversation_id"])
+                    for row in output
+                    if row["conversation_id"]
+                }
+                if pairs:
+                    counts = {
+                        (row[0], row[1]): row[2]
+                        for row in sql.execute(
+                            "SELECT store_id,conversation_id,count(*) FROM emails WHERE "
+                            + " OR ".join(
+                                "(store_id=? AND conversation_id=?)" for _ in pairs
+                            )
+                            + " GROUP BY store_id,conversation_id",
+                            [value for pair in pairs for value in pair],
+                        )
+                    }
+                    for row in output:
+                        row["thread_mail_count"] = counts.get(
+                            (row["store_id"], row["conversation_id"]), 1
+                        )
+            thread_info = {}
+            if selected_mode == "thread":
+                context_started = time.perf_counter()
+                thread_info = dict(
+                    thread_index=threads.status(sql),
+                    thread_parent_search_used=bool(lexical_weight and not filtered and threads.available(sql)),
+                    thread_context=threads.contexts(sql, output, condition, params),
+                )
+                thread_info["thread_context_ms"] = round((time.perf_counter()-context_started)*1000)
+            return finish(
+                {
+                    **thread_info,
+                    "query": query,
+                    "count": len(output),
+                    "items": output,
+                    "embedding_ms": embedding_ms,
+                    "elapsed_ms": round((time.perf_counter() - started) * 1000),
+                    "hybrid": selected_mode in {"hybrid", "thread"},
+                    "search_mode": selected_mode,
+                    "deduplicate": deduplicate,
+                    "metadata_prefilter": native_filters,
+                    "vector_search_exact": cfg.get("search_exact", False),
+                    "search_nprobes": cfg.get("search_nprobes"),
+                    "search_ef": cfg.get("search_ef"),
+                    "query_cache_hit": query_cache_hit,
+                    "min_similarity": min_similarity,
+                    "candidate_limit": candidate_count,
+                    "candidate_cap": candidate_cap,
+                    "candidate_limit_reached": len(output) < limit
+                    and not exhausted
+                    and candidate_count >= candidate_cap,
+                    "candidate_time_limit_reached": len(output) < limit
+                    and not exhausted
+                    and time_limited,
+                    "grouped_by_thread": group_by_thread,
+                    "source": "local_index",
+                    "freshness": "As of last sync; use sync_index(action='start') to refresh.",
+                },
+                sql,
+            )
+    finally:
+        sql.close()

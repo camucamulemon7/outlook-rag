@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Callable, Literal
 from weakref import WeakKeyDictionary
+from functools import wraps
+import threading
+import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
@@ -33,6 +36,7 @@ MAIL_SEARCH_INSTRUCTIONS = (
 STANDARD_TOOLS = {"search_emails", "get_indexed_mail", "get_mail_thread", "index_status", "list_outlook_sources", "sync_index"}
 _REGISTERED: WeakKeyDictionary[FastMCP, set[str]] = WeakKeyDictionary()
 _OPTIONS: dict[str, dict] = {}
+_OUTLOOK_LOCK = threading.Lock()
 
 
 def configure_tools(mcp: FastMCP, adapters: dict[str, Callable[..., dict]], profile: str = "standard") -> None:
@@ -43,7 +47,17 @@ def configure_tools(mcp: FastMCP, adapters: dict[str, Callable[..., dict]], prof
     for name in sorted(_REGISTERED.get(mcp, set())):
         mcp.remove_tool(name)
     for name in sorted(names):
-        mcp.add_tool(adapters[name], **_OPTIONS[name])
+        function = adapters[name]
+        @wraps(function)
+        async def dispatch(*args: Any, _function: Callable = function, **kwargs: Any) -> dict:
+            def execute() -> dict:
+                outlook = _function.__name__ in {"list_outlook_sources", "sync_emails", "retry_failed_emails", "start_sync_job"} or (_function.__name__ == "sync_index" and kwargs.get("action", "status") == "start")
+                if outlook:
+                    with _OUTLOOK_LOCK:
+                        return _function(*args, **kwargs)
+                return _function(*args, **kwargs)
+            return await anyio.to_thread.run_sync(execute)
+        mcp.add_tool(dispatch, **_OPTIONS[name])
     _REGISTERED[mcp] = set(names)
 
 
@@ -75,10 +89,16 @@ def register_tools(mcp: FastMCP, backend: Any) -> dict[str, Callable[..., dict]]
         subject: str | None = None,
         recipient: str | None = None,
         cursor: str | None = None,
+        has_attachments: bool | None = None,
+        deduplicate: bool = True,
     ) -> dict:
-        """Search ALL indexed Outlook stores including PST archives by default. Leave folder/since/until unset for ordinary mail lookup unless the user explicitly restricts scope; never assume inbox-only or recent-mail-only. Results include search_scope and coverage; zero hits do not establish absence from unindexed archives. Check list_outlook_sources and index_status before concluding not found. mode: semantic (paraphrases), hybrid (semantic + BM25, default), lexical (keywords), identifier (one exact ID), auto (semantic or unambiguous single ID), metadata (SQL attribute lists, no model), thread (hybrid + thread index + scoped chronological originals). Use metadata with query='' and explicit sender/date/subject/recipient filters for lists. Metadata query is a literal subject substring; subject/recipient/cursor are metadata-only. Continue pages with next_cursor and identical filters. Thread context is bounded, not a generated decision summary; read originals with get_indexed_mail/get_mail_thread when truncated. since/until are inclusive dates. min_similarity (-1..1) is model-calibrated cosine, not confidence. group_by_thread keeps the strongest match per store/conversation."""
-        options = {"mode": mode} if mode is not None else {}
+        """Search ALL indexed Outlook stores including PST archives by default. Leave folder/since/until unset unless explicitly restricted; never assume inbox-only/recent scope. Check search_scope and coverage before declaring absence. mode: semantic, hybrid (default BM25 + vector), lexical, identifier (one literal ID), auto, metadata (SQL lists, no model), thread (hybrid + scoped chronological originals). For attribute lists use metadata with query=''; subject/cursor are metadata-only. sender matches name/address, recipient matches To/CC in all modes, folder accepts wildcards or trailing slash prefixes, has_attachments filters indexed metadata. Message-ID deduplication defaults on; false shows every copy. Continue metadata pages with next_cursor and identical filters. Thread context is bounded original evidence, not a generated decision summary; read originals when truncated. Attachment matches include attachment_name when enabled. since/until are inclusive local calendar dates; min_similarity (-1..1) is calibrated cosine, not confidence."""
+        options: dict[str, Any] = {"mode": mode} if mode is not None else {}
         options.update({name: value for name, value in (("subject", subject), ("recipient", recipient), ("cursor", cursor)) if value is not None})
+        if has_attachments is not None:
+            options["has_attachments"] = has_attachments
+        if not deduplicate:
+            options["deduplicate"] = False
         return backend.search(
             query,
             limit,

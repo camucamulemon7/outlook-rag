@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 import httpx
 from filelock import Timeout
 
-from . import coverage, storage, threads
+from . import coverage, outlook, paths, storage, threads, mail_metadata
 
 
 def local_config() -> dict:
@@ -155,10 +155,9 @@ def failure_reason(exc: Exception) -> str:
 
 
 def failures(cfg: dict, limit: int=50, offset: int=0, folder: str | None=None) -> dict:
-    from . import app
     if type(limit) is not int or not 1 <= limit <= 200 or type(offset) is not int or not 0 <= offset <= 100000:
         raise ValueError("limit must be 1..200 and offset 0..100000")
-    with app._LOCK, stored_sql(cfg) as sql:
+    with stored_sql(cfg) as sql:
         if sql is None:
             return dict(items=[],count=0,total=0,offset=offset,next_offset=None)
         if sql is not None:
@@ -218,7 +217,7 @@ def retry(cfg: dict, mail_ids: list[str], max_seconds: float=30) -> dict:
                             if namespace is None:
                                 raise RuntimeError("Outlook namespace unavailable")
                             item = namespace.GetItemFromID(old['entry_id'],old['store_id'])
-                            metadata.update(item=item,modified=app.iso(item.LastModificationTime),received=app.iso(item.ReceivedTime))
+                            metadata.update(item=item,modified=outlook.item_date(item, "LastModificationTime", outlook.MODIFIED),received=outlook.item_date(item, "ReceivedTime", outlook.RECEIVED), _attachment_cfg=local)
                             mail = app.read_outlook_mail(namespace,metadata,old['store_id'],old['folder'])
                             phase = 'index'
                             app.upsert_mails([mail],sql,table,local,client)
@@ -296,18 +295,16 @@ def folder_progress(sql: sqlite3.Connection, cfg: dict) -> list[dict]:
 
 
 def progress(cfg: dict) -> dict:
-    from . import app
-    with app._LOCK, stored_sql(cfg) as sql:
+    with stored_sql(cfg) as sql:
         return dict(folders=folder_progress(sql,cfg) if sql is not None else [],source='saved_sync_checkpoints',live_outlook_access=False)
 
 
 def thread(cfg: dict, mail_id: str, before: int=3, after: int=3, max_body_chars: int=2000) -> dict:
-    from . import app
     if not isinstance(mail_id,str) or not re.fullmatch(r'[0-9a-f]{64}',mail_id):
         raise ValueError('Invalid mail_id')
     if any(type(v) is not int or not 0 <= v <= 50 for v in (before,after)) or type(max_body_chars) is not int or not 0 <= max_body_chars <= 10000:
         raise ValueError('before/after must be 0..50 and max_body_chars 0..10000')
-    with app._LOCK, stored_sql(cfg) as sql:
+    with stored_sql(cfg) as sql:
         if sql is None:
             raise ValueError('Indexed mail not found.')
         if sql is not None:
@@ -363,43 +360,49 @@ def status(backend: Any) -> dict:
     cfg = backend.local_config()
     if not cfg.get('dimensions'):
         raise ValueError('Index not initialized. Run sync_index(action="start") with the embedding API available first.')
-    with backend._LOCK:
-        sql, table = storage.open_index(cfg, writable=False)
-        try:
-            with backend.indexed_snapshot(sql, table, cfg) as table:
-                return {"folder_progress": backend.folder_progress(sql, dict(cfg, folders="auto")), "search_coverage": coverage.index_coverage(sql, cfg), "model": cfg["model"], "dimensions": cfg["dimensions"],
-                    "storage_dimensions": backend.vector_dimensions(cfg),
-                    "text_cleaning_version": cfg["text_cleaning_version"],
-                    "emails": sql.execute("SELECT count(*) FROM emails").fetchone()[0],
-                    "chunks": sql.execute("SELECT count(*) FROM chunks").fetchone()[0],
-                    "cached_embeddings": sql.execute("SELECT count(*) FROM embedding_cache").fetchone()[0],
-                    "cached_queries": sql.execute("SELECT count(*) FROM query_cache").fetchone()[0],
-                    "failed_emails": sql.execute("SELECT count(*) FROM sync_failures").fetchone()[0],
-                    "sync_max_seconds": cfg.get("sync_max_seconds", 30), "sync_max_scanned": cfg.get("sync_max_scanned", 2000),
-                    "embedding_request_dimensions": cfg.get("embedding_request_dimensions", 0),
-                    "api_dimension_reduction": backend._API_DIMENSIONS.get((cfg["embedding_url"], cfg["model"], cfg.get("embedding_request_dimensions", 0)), "unverified"),
-                    "embedding_batch_size": cfg["embedding_batch_size"], "embedding_concurrent_requests": cfg["embedding_concurrent_requests"], "sync_batch_emails": cfg["sync_batch_emails"], "sync_prefetch_emails": cfg.get("sync_prefetch_emails", 16),
-                    "vector_rows": table.count_rows(), "vector_indexes": [str(index) for index in table.list_indices()],
-                    "vector_coverage": storage.vector_status(table), "vector_metadata_filters": storage.metadata_ready(sql, table),
-                    "thread_index": threads.status(sql),
-                    "folders": [dict(row) for row in sql.execute("SELECT folder, count(*) AS emails, max(indexed_at) AS last_indexed FROM emails GROUP BY folder")],
-                    "sync_windows": [window for row in sql.execute("SELECT value FROM state WHERE key LIKE 'sync:%'")
-                                     if (window := json.loads(row[0])) and (cfg.get("folders") == "auto" or window.get("folder") in cfg["folders"])],
-                    "data_dir": cfg["data_dir"]}
-        finally:
-            sql.close()
+    sql, table = storage.open_index(cfg, writable=False)
+    try:
+        with backend.indexed_snapshot(sql, table, cfg) as table:
+            return {"folder_progress": backend.folder_progress(sql, dict(cfg, folders="auto")), "search_coverage": coverage.index_coverage(sql, cfg), "model": cfg["model"], "dimensions": cfg["dimensions"],
+                "storage_dimensions": backend.vector_dimensions(cfg),
+                "text_cleaning_version": cfg["text_cleaning_version"],
+                "index_attachments": cfg.get("index_attachments", False),
+                "emails": sql.execute("SELECT count(*) FROM emails").fetchone()[0],
+                "chunks": sql.execute("SELECT count(*) FROM chunks").fetchone()[0],
+                "cached_embeddings": sql.execute("SELECT count(*) FROM embedding_cache").fetchone()[0],
+                "cached_queries": sql.execute("SELECT count(*) FROM query_cache").fetchone()[0],
+                "failed_emails": sql.execute("SELECT count(*) FROM sync_failures").fetchone()[0],
+                "sync_max_seconds": cfg.get("sync_max_seconds", 30), "sync_max_scanned": cfg.get("sync_max_scanned", 2000),
+                "embedding_request_dimensions": cfg.get("embedding_request_dimensions", 0),
+                "api_dimension_reduction": backend._API_DIMENSIONS.get((cfg["embedding_url"], cfg["model"], cfg.get("embedding_request_dimensions", 0)), "unverified"),
+                "embedding_batch_size": cfg["embedding_batch_size"], "embedding_concurrent_requests": cfg["embedding_concurrent_requests"], "sync_batch_emails": cfg["sync_batch_emails"], "sync_prefetch_emails": cfg.get("sync_prefetch_emails", 16),
+                "vector_rows": table.count_rows(), "vector_indexes": [str(index) for index in table.list_indices()],
+                "vector_coverage": storage.vector_status(table), "vector_metadata_filters": storage.metadata_ready(sql, table),
+                "thread_index": threads.status(sql),
+                "folders": [dict(row) for row in sql.execute("SELECT folder, count(*) AS emails, max(indexed_at) AS last_indexed FROM emails GROUP BY folder")],
+                "sync_windows": [window for row in sql.execute("SELECT value FROM state WHERE key LIKE 'sync:%'")
+                                 if (window := json.loads(row[0])) and (cfg.get("folders") == "auto" or window.get("folder") in cfg["folders"])],
+                "date_validation": "rescan_required" if sql.execute("SELECT value FROM state WHERE key='outlook_dates_need_rescan' AND value='1'").fetchone() or not sql.execute("SELECT 1 FROM state WHERE key='outlook_date_schema'").fetchone() else "source_timezone_normalized",
+                "data_dir": cfg["data_dir"], "warnings": paths.warnings(cfg)}
+    finally:
+        sql.close()
 
 
 def get_mail(backend: Any, mail_id: str, max_body_chars: int = 10000) -> dict:
     if not 0 <= max_body_chars <= 100000:
         raise ValueError("max_body_chars must be 0..100000")
-    with backend._LOCK, backend.stored_sql(backend.local_config()) as sql:
+    with backend.stored_sql(backend.local_config()) as sql:
         if sql is None:
             raise ValueError('Indexed mail not found.')
         row = sql.execute("SELECT * FROM emails WHERE id=?", (mail_id,)).fetchone()
         if not row:
             raise ValueError("Indexed mail not found.")
         result = dict(row)
+        result.update(mail_metadata.lookup(sql, [mail_id]).get(mail_id, {}))
+        if sql.execute("SELECT 1 FROM sqlite_master WHERE name='attachment_reports'").fetchone():
+            report = sql.execute("SELECT report FROM attachment_reports WHERE email_id=?", (mail_id,)).fetchone()
+            if report:
+                result["attachment_indexing"] = json.loads(report[0])
         result["body_truncated"] = len(result["body"]) > max_body_chars
         result["body"] = result["body"][:max_body_chars]
         result["source"] = "local_index"

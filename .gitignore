@@ -18,3 +18,5 @@ indexing-*.json
 test-results*.json
 quality-comparison.json
 vllm-diagnostic.json
+.coverage*
+coverage.xml
