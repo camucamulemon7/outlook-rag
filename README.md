@@ -158,6 +158,7 @@ uv run --frozen outlook-rag progress
 uv run --frozen outlook-rag thread <mail_id> --before 3 --after 3
 uv run --frozen outlook-rag search "shipping changes" --folder inbox --min-similarity 0.6
 uv run --frozen outlook-rag search "HT-5639" --mode identifier
+uv run --frozen outlook-rag search "shipping changes" --since 2025-01-01 --until 2025-12-31
 uv run --frozen outlook-rag doctor
 uv run --frozen outlook-rag backup-index C:\backups\outlook-rag-20261013
 uv run --frozen outlook-rag rebuild-vectors
@@ -179,6 +180,8 @@ GitHub Actions runs the complete offline unit suite on every push and pull reque
 To test an already configured embedding API with synthetic mail, provide its existing credentials through `OUTLOOK_RAG_API_KEY`, then run `uv run --frozen python tests/verify_live_api.py --url <embedding-endpoint> --model <model-id>`. Add `--uv <uv-executable>` to include the API/ANN and MCP integration scripts. The test uses temporary indexes and a local fault proxy to verify outage recovery without stopping your provider. No real Outlook mail is read; COM/WMI remain untested by this check.
 
 `tests/verify_live_search.py --url <embedding-endpoint> --model <model-id>` checks identifier/paraphrase regressions, eight additional natural-language queries, threshold tradeoffs, offline recovery and ANN Recall@10/100 with real API vectors. `tests/benchmark_search.py` separately measures native filtering against legacy shards on 100k synthetic mail IDs / 500k random-vector chunks by default; it needs temporary disk space above 2 GB and no API. Both use temporary indexes and print aggregate results.
+
+For full search latency, run `uv run --frozen python tests/benchmark_mail_search.py --emails 1000000 --chunks-per-mail 5`. It loads one million synthetic mails and five million random 1024D vectors, builds ANN, and measures semantic, hybrid and lexical searches with all dates and a specified date range. Allow over 50 GiB temporary disk space and time for index construction. Query embeddings are synthetic unless both `--embedding-url` and `--model` are supplied; real API credentials belong in `OUTLOOK_RAG_API_KEY`. Reports distinguish query embedding time from search time and include an uncached hybrid search. These are speed measurements, not real-mail relevance scores or a guarantee for other hardware.
 
 ## License
 
