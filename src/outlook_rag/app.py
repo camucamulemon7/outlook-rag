@@ -240,7 +240,8 @@ def vector_dimensions(cfg: dict) -> int:
 
 def embed(texts: list[str], cfg: dict, *, query: bool = False, client: httpx.Client | None = None) -> list[list[float]]:
     if client is None:
-        with httpx.Client(timeout=httpx.Timeout(120, connect=10), trust_env=False) as owned:
+        limits = httpx.Limits(max_connections=32, max_keepalive_connections=16, keepalive_expiry=60.0)
+        with httpx.Client(timeout=httpx.Timeout(120, connect=10), limits=limits, trust_env=False) as owned:
             return embed(texts, cfg, query=query, client=owned)
     texts = [safe_text(text) for text in texts]
     if query and "query_prefix" in cfg:
@@ -283,18 +284,49 @@ def embed(texts: list[str], cfg: dict, *, query: bool = False, client: httpx.Cli
     rows = sorted(response.json()["data"], key=lambda row: row["index"])
     if len(rows) != len(texts) or [row["index"] for row in rows] != list(range(len(texts))):
         raise ValueError("Embedding API returned an unexpected number or ordering of vectors.")
-    result = []
-    for row in rows:
-        vector = row["embedding"]
-        if len(vector) not in ({cfg["dimensions"], requested} if requested else {cfg["dimensions"]}) or not all(math.isfinite(v) for v in vector):
+    target_dim = vector_dimensions(cfg)
+    expected_dims = {cfg["dimensions"], requested} if requested else {cfg["dimensions"]}
+    dimension_groups: dict[int, list[int]] = {}
+    for position, row in enumerate(rows):
+        dim = len(row["embedding"])
+        if dim not in expected_dims:
             raise ValueError("Embedding dimensions or values do not match the index configuration.")
-        if requested:
-            _API_DIMENSIONS[capability_key] = len(vector) == requested
-        vector = vector[:vector_dimensions(cfg)]
-        norm = math.sqrt(sum(v * v for v in vector))
-        if norm == 0:
-            raise ValueError("Embedding API returned a zero vector.")
-        result.append([v / norm for v in vector])
+        dimension_groups.setdefault(dim, []).append(position)
+    try:
+        import numpy as np
+    except ImportError:
+        result: list[list[float]] = []
+        for row in rows:
+            vector = row["embedding"]
+            if not all(math.isfinite(v) for v in vector):
+                raise ValueError("Embedding dimensions or values do not match the index configuration.")
+            vector = vector[:target_dim]
+            norm = math.sqrt(sum(v * v for v in vector))
+            if norm == 0:
+                raise ValueError("Embedding API returned a zero vector.")
+            if not math.isfinite(norm):
+                raise ValueError("Embedding dimensions or values do not match the index configuration.")
+            result.append([v / norm for v in vector])
+    else:
+        result = [[] for _ in rows]
+        # Providers may return either native or requested dimensions per row.
+        # Validate every value before truncation, then restore response order.
+        for positions in dimension_groups.values():
+            matrix = np.asarray([rows[position]["embedding"] for position in positions], dtype=float)
+            if not np.isfinite(matrix).all():
+                raise ValueError("Embedding dimensions or values do not match the index configuration.")
+            matrix = matrix[:, :target_dim]
+            with np.errstate(over="ignore"):
+                norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+            if (norms == 0).any():
+                raise ValueError("Embedding API returned a zero vector.")
+            if not np.isfinite(norms).all():
+                raise ValueError("Embedding dimensions or values do not match the index configuration.")
+            matrix /= norms
+            for position, vector in zip(positions, matrix.tolist()):
+                result[position] = vector
+    if requested:
+        _API_DIMENSIONS[capability_key] = set(dimension_groups) == {requested}
     return result
 
 
@@ -440,14 +472,21 @@ def upsert_mails(mails: list[dict], sql: sqlite3.Connection, table: Any, cfg: di
             digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
             records.append((f"{mail['id']}:{position}", mail["id"], position, text, digest))
             unique.setdefault(digest, text)
-    cached, missing = {}, []
-    for digest, text in unique.items():
-        row = sql.execute("SELECT vector, terms FROM embedding_cache WHERE hash=?", (digest,)).fetchone()
-        if row:
+    cached: dict[str, tuple[list[float], str]] = {}
+    missing: list[tuple[str, str]] = []
+    digests = list(unique.keys())
+    for i in range(0, len(digests), 500):
+        batch_digests = digests[i : i + 500]
+        placeholders = ",".join("?" for _ in batch_digests)
+        for row in sql.execute(
+            f"SELECT hash, vector, terms FROM embedding_cache WHERE hash IN ({placeholders})",
+            batch_digests,
+        ).fetchall():
             vector = array("f")
             vector.frombytes(row["vector"])
-            cached[digest] = (list(vector), row["terms"])
-        else:
+            cached[row["hash"]] = (list(vector), row["terms"])
+    for digest, text in unique.items():
+        if digest not in cached:
             missing.append((digest, text))
     stats["cache_hits"] = sum(digest in cached for *_, digest in records)
     stats["prepare_ms"] = round((time.perf_counter() - stage) * 1000)
@@ -456,7 +495,8 @@ def upsert_mails(mails: list[dict], sql: sqlite3.Connection, table: Any, cfg: di
         sql.executemany("DELETE FROM embedding_pending WHERE email_id=?", [(mid,) for mid in changed])
         sql.executemany("INSERT OR IGNORE INTO embedding_pending VALUES (?,?)", [(mid, digest) for _, mid, _, _, digest in records])
     if client is None:
-        client = httpx.Client(timeout=httpx.Timeout(120, connect=10), trust_env=False)
+        limits = httpx.Limits(max_connections=32, max_keepalive_connections=16, keepalive_expiry=60.0)
+        client = httpx.Client(timeout=httpx.Timeout(120, connect=10), limits=limits, trust_env=False)
         owned = True
     else:
         owned = False
@@ -474,6 +514,24 @@ def upsert_mails(mails: list[dict], sql: sqlite3.Connection, table: Any, cfg: di
             batches.append(pending)
         stage = time.perf_counter()
         tokenize_seconds = cache_seconds = 0.0
+        precomputed_terms: dict[str, str] = {}
+        token_errors: dict[str, Exception] = {}
+        missing_iter = iter(missing)
+
+        def precompute_one_token() -> bool:
+            try:
+                d, t = next(missing_iter)
+                if d not in precomputed_terms:
+                    try:
+                        precomputed_terms[d] = tokens(t)
+                    except Exception as exc:
+                        # Surface this error only when its embedding completes;
+                        # earlier successful requests must still reach the cache.
+                        token_errors[d] = exc
+                return True
+            except StopIteration:
+                return False
+
         def persist_batch(batch: Any, vectors: Any) -> None:
             nonlocal tokenize_seconds, cache_seconds
             if len(vectors) != len(batch):
@@ -481,7 +539,12 @@ def upsert_mails(mails: list[dict], sql: sqlite3.Connection, table: Any, cfg: di
             mark = time.perf_counter()
             entries = []
             for (digest, text), vector in zip(batch, vectors):
-                terms = tokens(text)
+                if digest in token_errors:
+                    raise token_errors[digest]
+                terms = precomputed_terms.get(digest)
+                if terms is None:
+                    terms = tokens(text)
+                    precomputed_terms[digest] = terms
                 cached[digest] = (vector, terms)
                 entries.append((digest, array("f", vector).tobytes(), terms))
             tokenize_seconds += time.perf_counter() - mark
@@ -505,20 +568,24 @@ def upsert_mails(mails: list[dict], sql: sqlite3.Connection, table: Any, cfg: di
                 while active:
                     idle = cfg.get("_embedding_idle")
                     ready = idle and cfg.get("_embedding_idle_ready", lambda: True)()
-                    completed, _ = wait(active, timeout=0.01 if ready else None, return_when=FIRST_COMPLETED)
+                    has_more_tokens = len(precomputed_terms) + len(token_errors) < len(missing)
+                    completed, _ = wait(active, timeout=0.01 if (ready or has_more_tokens) else None, return_when=FIRST_COMPLETED)
                     if not completed:
-                        if idle:
+                        if idle and ready:
                             idle()
+                        elif has_more_tokens:
+                            mark = time.perf_counter()
+                            precompute_one_token()
+                            tokenize_seconds += time.perf_counter() - mark
                         continue
                     failure = None
                     for future in completed:
                         batch = active.pop(future)
                         try:
                             vectors = future.result()
+                            persist_batch(batch, vectors)
                         except Exception as exc:
                             failure = failure or exc
-                        else:
-                            persist_batch(batch, vectors)
                     if failure is not None:
                         # Do not launch more requests. Retain successes already in flight,
                         # even if the failed future completed before a successful one.
@@ -529,9 +596,9 @@ def upsert_mails(mails: list[dict], sql: sqlite3.Connection, table: Any, cfg: di
                                 continue
                             try:
                                 vectors = future.result()
+                                persist_batch(batch, vectors)
                             except Exception:
                                 continue
-                            persist_batch(batch, vectors)
                         raise failure
                     for _ in completed:
                         submit_next()
@@ -625,7 +692,8 @@ def sync(folders: list[str] | None = None, max_emails: int | None = None, since_
     reports, pending_folders, discovery_errors, folder_errors, target_folders = [], [], [], [], []
     indexed_total = scanned_total = attempted_total = retried = failed_total = 0
     stop_reason = None
-    with mutation_lock(cfg), httpx.Client(timeout=httpx.Timeout(120, connect=10), trust_env=False) as client:
+    limits = httpx.Limits(max_connections=32, max_keepalive_connections=16, keepalive_expiry=60.0)
+    with mutation_lock(cfg), httpx.Client(timeout=httpx.Timeout(120, connect=10), limits=limits, trust_env=False) as client:
         pythoncom.CoInitialize()
         sql = None
         try:
