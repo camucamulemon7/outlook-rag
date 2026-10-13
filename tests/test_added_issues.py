@@ -76,6 +76,9 @@ class AddedIssues(unittest.TestCase):
 
         with patch.object(app, "embed", side_effect=vectors):
             app.upsert_mails(mails, self.sql, self.table, self.cfg)
+            # Legacy tables lack native metadata; keep the bounded fallback covered.
+            with self.sql:
+                self.sql.execute("DELETE FROM state WHERE key='vector_metadata'")
             expressions = []
             original = search.id_filter
 

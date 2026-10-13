@@ -70,7 +70,7 @@ Worker status includes a local `log_path` and the last 20 diagnostic events. Log
 
 Failures are retained for later retry and counted by `index_status`. Use `maintain_index` when you want to remove unused embedding caches and compact vector storage; recent versions are retained for seven days.
 
-With an existing matching index, MCP startup, cached mail reads, index/job status and job cancellation recover dimensions locally when the embedding API is unavailable. A saved job snapshot also allows status and cancellation before the worker initializes its database. Initial setup, search and indexing still require the API; startup still requires configured API credentials. Omitting a job ID selects the most recently created job, even if an older worker updates its status later.
+With an existing matching index, cached operations and maintenance recover dimensions locally when the embedding API is unavailable. Semantic searches need the API only for an uncached query. Lexical and identifier searches need no embeddings unless `min_similarity` is set. Initial indexing needs the API; MCP startup still requires configured API credentials. A saved job snapshot also allows status and cancellation before database initialization. Omitting a job ID selects the most recently created job.
 
 | Tool | Purpose |
 | --- | --- |
@@ -96,6 +96,10 @@ Use `list_sync_failures` to inspect causes and retry schedules, then pass its `m
 `get_sync_progress`, `index_status` and `sync_job_status` expose per-folder indexed/failed counts, scan progress, processing rate and ETA. Remaining counts use Outlook item-count estimates, which can include non-mail items. ETA is `null` when the scope or rate is unknown, including incomplete checkpoints from older versions. A completed scan may still have failed mail to recover. These status calls use saved snapshots and make no live Outlook calls.
 
 Use `search_emails(min_similarity=0.6)` to exclude chunks below a cosine similarity threshold, including BM25-only candidates. The default is `None`, preserving relative ranking; calibrate a threshold for your model rather than interpreting the score as a confidence probability. Long chunks return a plain-text window around a query match when available.
+
+`mode` selects `semantic`, `hybrid`, `lexical`, `identifier` or `auto`. The default remains `hybrid`; `hybrid=false` still selects semantic search. For paraphrases, select `semantic`. `identifier` requires one complete ASCII ID such as `HT-5639` and returns only exact ID matches, with newest mail first. Prefixes such as `HN-5639` and suffixes such as `HT-56390` do not match. `auto` is opt-in: a single unambiguous ID uses identifier search, otherwise it uses semantic search. Multiple IDs and common negation phrases use semantic search; this is a heuristic and does not implement Boolean queries. An unknown exact ID returns zero matches. Natural-language no-answer handling still requires a calibrated `min_similarity`.
+
+Fresh indexes keep folder, sender and received date in the vector table for native prefiltering. Legacy indexes retain bounded ID-shard filtering until `rebuild-vectors` upgrades them without an API call. SQLite remains authoritative and the matching vector version is published with each metadata/content change. Search batches metadata and thread counts, omits full bodies, and does not initialize schemas on the read path.
 
 Set `search_emails(group_by_thread=true)` to keep the strongest match per store/conversation. `thread_mail_count` includes all cached mail in that conversation, even outside search filters. Call `get_mail_thread(mail_id=..., before=3, after=3)` for chronological context around a result. Empty conversation IDs remain separate emails. Context is limited to indexed mail, with bounded body output; no additional embedding request is needed.
 
@@ -133,7 +137,7 @@ cd outlook-rag
 uv run --frozen python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
-Evaluate your own labeled search queries with `tests/evaluate_search.py`; keep real-mail labels outside the repository. Candidate count and RRF weights are configurable without rebuilding the index.
+Evaluate private labeled queries with `uv run --frozen python tests/evaluate_search.py config.json labels.json --ann`. Keep real-mail labels outside Git. It reports cold runs with query caching disabled, explicitly primed warm runs, Hit@1/5/10, MRR, labeled recall and no-answer rate. Empty target lists label no-answer queries; `--min-similarity` tests a threshold. `--ann` separately measures chunk Recall@10 against exact cosine search, excluding embedding time. Configure `search_nprobes` and `search_ef` for the latency/recall tradeoff, or `search_exact=true` for a ground truth baseline. ANN defaults remain the SDK defaults; measure representative queries before tuning.
 
 Search expands its initial chunk pool when mail/thread deduplication leaves too few results, up to 5,000 candidates per source and a five-second cooperative budget checked between rounds. Results report the final `candidate_limit` and whether a count/time limit stopped expansion.
 
@@ -148,7 +152,16 @@ uv run --frozen outlook-rag failures retry <mail_id> --max-seconds 30
 uv run --frozen outlook-rag progress
 uv run --frozen outlook-rag thread <mail_id> --before 3 --after 3
 uv run --frozen outlook-rag search "shipping changes" --folder inbox --min-similarity 0.6
+uv run --frozen outlook-rag search "HT-5639" --mode identifier
+uv run --frozen outlook-rag doctor
+uv run --frozen outlook-rag backup-index C:\backups\outlook-rag-20261013
+uv run --frozen outlook-rag rebuild-vectors
+uv run --frozen outlook-rag restore-index C:\backups\outlook-rag-20261013 C:\indexes\outlook-rag-restored
 ```
+
+SQLite (`metadata.sqlite`) holds mail, chunks, lexical indexes, embedding caches and publication state. LanceDB (`vectors/`) is a derived index. Both are embedded local databases; no DB service is required. `doctor` checks SQLite, chunk/vector IDs, lexical coverage and cached embeddings. `backup-index` captures the SQLite backup and its vector generation under the writer/reader locks. Backups contain private mail; choose an appropriately protected location outside `data_dir`. Backup and restore destinations must be new directories. Restore verifies the pair and never replaces an existing index; set `data_dir` to the reported restored directory to use it.
+
+`rebuild-vectors` reconstructs vector metadata, ANN (from 256 chunks), lexical and identifier indexes from cached chunks/embeddings, then atomically publishes the new table. It requires no API key or Outlook connection and leaves the existing publication intact on failure. Missing or invalid cached embeddings require a re-sync; it does not guess replacements. Keep a paired backup before maintenance. Old vector generations remain until `maintain_index` runs; rebuilding temporarily requires space for another vector index. Maintenance removes unused generations while protecting readers. Rebuild/backup/restore/doctor are CLI commands; the MCP tool count remains fourteen.
 
 Use `outlook-rag --help`, `outlook-rag job --help` and `outlook-rag failures --help` for options. Commands return JSON; no command starts MCP stdio.
 
@@ -159,6 +172,8 @@ On Windows with Outlook Classic, run `uv run --frozen python tests/verify_outloo
 GitHub Actions runs the complete offline unit suite on every push and pull request, on Ubuntu 24.04 and Windows Server 2025 with Python 3.11, 3.12 and 3.13. Dependencies come from `uv.lock` via `uv sync --frozen`; the test command then runs with uv offline. A separate quality job runs locked Ruff and Mypy. CI needs no API credentials, OpenWebUI service or user mail. Windows installs the real pywin32 package, but Outlook dispatch and background worker launch remain mocked; Linux substitutes COM imports. No tests are intentionally skipped for either OS. These checks do not validate a real Outlook profile, PST/GetTable provider behavior, WMI worker survival or screen interaction.
 
 To test an already configured embedding API with synthetic mail, provide its existing credentials through `OUTLOOK_RAG_API_KEY`, then run `uv run --frozen python tests/verify_live_api.py --url <embedding-endpoint> --model <model-id>`. Add `--uv <uv-executable>` to include the API/ANN and MCP integration scripts. The test uses temporary indexes and a local fault proxy to verify outage recovery without stopping your provider. No real Outlook mail is read; COM/WMI remain untested by this check.
+
+`tests/verify_live_search.py --url <embedding-endpoint> --model <model-id>` checks identifier/paraphrase regressions, eight additional natural-language queries, threshold tradeoffs, offline recovery and ANN Recall@10/100 with real API vectors. `tests/benchmark_search.py` separately measures native filtering against legacy shards on 100k synthetic mail IDs / 500k random-vector chunks by default; it needs temporary disk space above 2 GB and no API. Both use temporary indexes and print aggregate results.
 
 ## License
 

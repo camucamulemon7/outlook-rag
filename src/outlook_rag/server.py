@@ -21,8 +21,10 @@ def register_tools(mcp: FastMCP, backend: Any) -> dict[str, Callable[..., dict]]
         hybrid: bool = True,
         group_by_thread: bool = False,
         min_similarity: float | None = None,
+        mode: str | None = None,
     ) -> dict:
-        """Fast semantic + Japanese BM25 search over indexed emails. since/until are inclusive YYYY-MM-DD bounds. Returns query-centered passages and original Outlook IDs. Optional min_similarity (-1..1) filters by cosine similarity; calibrate per model. group_by_thread keeps the strongest match per store/conversation."""
+        """Search indexed mail. mode: semantic (paraphrases), hybrid (semantic + BM25), lexical (keywords), identifier (one exact ID such as INV-1047), auto (semantic or unambiguous single ID). Default preserves hybrid behavior. Auto is opt-in; comparisons/negation use semantic. since/until are inclusive dates. min_similarity (-1..1) is a model-calibrated cosine filter, not confidence. group_by_thread keeps the strongest match per store/conversation."""
+        options = {"mode": mode} if mode is not None else {}
         return backend.search(
             query,
             limit,
@@ -33,6 +35,7 @@ def register_tools(mcp: FastMCP, backend: Any) -> dict[str, Callable[..., dict]]
             hybrid,
             group_by_thread,
             min_similarity,
+            **options,
         )
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
