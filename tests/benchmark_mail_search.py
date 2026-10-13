@@ -204,7 +204,7 @@ def run(args, cfg, sql):
     print(json.dumps(report), flush=True)
 
 
-def compare_threads(args, cfg, sql, table, built):
+def compare_threads(args, cfg, sql, built):
     """Same scale index, actual old search source, interleaved measured runs."""
     source = subprocess.check_output(
         ["git", "show", "427ee3d:src/outlook_rag/search.py"], text=True
@@ -213,6 +213,13 @@ def compare_threads(args, cfg, sql, table, built):
     exec(compile(source, "<baseline search>", "exec"), namespace)
     for query in QUERIES:
         app.cached_query_vector(query, sql, cfg)
+    # load() replaced the initially empty Lance table. Read the published
+    # generation rather than inspecting the stale handle from open_store().
+    current_sql, current_table = storage.open_index(cfg)
+    try:
+        vector_coverage = storage.vector_status(current_table)
+    finally:
+        current_sql.close()
     report = dict(
         emails=args.emails,
         chunks=args.emails * args.chunks_per_mail,
@@ -221,7 +228,7 @@ def compare_threads(args, cfg, sql, table, built):
         thread_documents=sql.execute(
             "SELECT count(*) FROM thread_documents"
         ).fetchone()[0],
-        vector_coverage=storage.vector_status(table),
+        vector_coverage=vector_coverage,
         thread_build=built,
         cache="query embeddings primed; OS cache retained; SQL/Lance handles reopened",
         pipeline={},
@@ -345,7 +352,7 @@ def main():
                     ):
                         built = threads.rebuild(cfg)
                     print(json.dumps(dict(stage="threads_ready", **built)), flush=True)
-                    compare_threads(args, cfg, sql, table, built)
+                    compare_threads(args, cfg, sql, built)
                 else:
                     run(args, cfg, sql)
             finally:

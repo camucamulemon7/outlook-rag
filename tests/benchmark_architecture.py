@@ -202,12 +202,17 @@ def percentile(values, p):
 
 def summarize(records):
     ranks, recall, evidence, latest = [], [], [], []
+    list_precision = []
     for row in records:
         target = set(row["expected_mail_ids"])
         ids = row["retrieved_ids"]
         rank = next((i for i, mid in enumerate(ids, 1) if mid in target), None)
         ranks.append(rank)
         recall.append(len(target.intersection(ids)) / len(target))
+        if row["category"] == "metadata":
+            list_precision.append(
+                len(target.intersection(ids)) / len(ids) if ids else 0
+            )
         if "expected_evidence_ids" in row:
             truth = set(row["expected_evidence_ids"])
             evidence.append(len(truth.intersection(row["evidence_ids"])) / len(truth))
@@ -218,6 +223,9 @@ def summarize(records):
         hit_at_10=statistics.mean(r is not None for r in ranks),
         mail_recall_at_10=statistics.mean(recall),
         mrr_at_10=statistics.mean(1 / r if r else 0 for r in ranks),
+        metadata_list_precision=statistics.mean(list_precision)
+        if list_precision
+        else None,
         thread_evidence_recall=statistics.mean(evidence) if evidence else None,
         latest_evidence_hit=statistics.mean(latest) if latest else None,
         cold_p50_ms=percentile([r["cold_ms"] for r in records], 50),

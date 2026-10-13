@@ -32,7 +32,7 @@ For the twenty history questions, latest-original evidence hits improve from 10%
 
 Forwarded-original Recall@10 improves from 0% to 100% only with v3; it retains facts that v2 removed. Paragraph-case Recall@10 stays 100%, while MRR drops from 0.468 to 0.452. Paragraph packing alone has no demonstrated ranking improvement here, so version 2 remains the default. Version 3 requires an explicit new index/full sync.
 
-Metadata lists retain 100% labeled recall, omit unrelated-subject mails, and use zero embedding calls. Their v3 cold P50/P95 is 0.40/0.52 ms. Thread originals increase response size: the v3 history category averages 28,066 bytes versus the old history response, and context bodies are capped at 12,000 characters per response. This additional evidence is a material payload/token cost, even when local retrieval time stays small. Exact category timings and old payload sizes are retained in the JSON.
+Metadata lists retain 100% labeled recall, improve exact-list precision from 50% to 100% by omitting unrelated-subject mails, and use zero embedding calls. Their v3 cold P50/P95 is 0.40/0.52 ms. Thread originals increase response size: the v3 history category averages 28,066 bytes versus 10,261 bytes for old history responses, and context bodies are capped at 12,000 characters per response. This additional evidence is a material payload/token cost, even when local retrieval time stays small. Category timings and payload sizes are retained in the JSON.
 
 ## Updating and adoption
 
@@ -59,3 +59,24 @@ uv run --frozen python tests/benchmark_mail_search.py --emails 1000000 --chunks-
 ```
 
 The second command uses synthetic mail and random document vectors, genuine provider query embeddings and temporary databases. It compares the old/current search algorithms on one index with primed query embeddings and interleaves modes. It requires substantial temporary disk/RAM and index-build time. It measures latency and derived thread build cost; its random vectors do not measure email relevance. Source-body matching in the first benchmark does not measure answer/citation correctness; those require a separate answer-generation evaluation with real representative questions.
+
+## One million mails / five million chunks
+
+An additional run built one million synthetic mails, five million 1,024D random unit vectors and 100,000 thread documents on the same host. Twenty consecutive generated mails share a conversation name; alternating stores split each into two ten-mail conversations. The vector index is IVF_HNSW_FLAT with 64 partitions, five million indexed rows and zero unindexed rows. Query embeddings come from OpenWebUI and are primed before retrieval. Three queries (two common keyword combinations and one rarer term), each repeated twice, are interleaved across old hybrid, current hybrid, current thread and metadata modes on the same database. All searches reopen SQL/Lance handles; OS caches are retained.
+
+| Scope / mode | Median | Maximum of six samples |
+| --- | ---: | ---: |
+| All dates, old hybrid | 2.955 s | 7.508 s |
+| All dates, current hybrid | 2.951 s | 4.384 s |
+| All dates, current thread | 3.260 s | 5.001 s |
+| All dates, current metadata | 1.915 ms | 8.700 ms |
+| Since 2026-01-01, old hybrid | 6.100 s | 6.325 s |
+| Since 2026-01-01, current hybrid | 3.523 s | 4.091 s |
+| Since 2026-01-01, current thread | 2.678 s | 4.552 s |
+| Since 2026-01-01, current metadata | 1.055 ms | 1.870 ms |
+
+Across the all-date samples, thread retrieval adds approximately 0.31 s / 10% to current hybrid's median while ordinary hybrid stays approximately unchanged. These six observations are insufficient for a reliable P95 or a claim that every mailbox/query fits five seconds. The different period-query timings show substantial variability; the ordinary hybrid algorithm is essentially unchanged, so its measured timing differences must not be interpreted as a new algorithmic speedup. A date restriction does not universally reduce latency. Metadata samples list the newest ten messages with no sender/subject/recipient restrictions; rare substring filters can require much more SQL scanning.
+
+The explicit thread-only rebuild takes 59.038 s for 100,000 conversations, with zero embedding/summary requests. This is a one-time/manual derived-index build, not work done during a search. ANN construction itself took much longer than querying. Temporary files occupied about 50 GiB and were removed after measurement. Generated texts and random document vectors make this a latency test only: it does not validate ANN relevance, Windows Outlook speed, or complete OpenCode/LLM response time. The existing ANN recall concern in #33 remains unresolved.
+
+[Full scale samples](million-thread-2026-10-14.json) include the recorded source of an auxiliary-statistics correction: the first summary used a stale empty Lance handle, although searches reopened the published populated generation. Vector coverage was corrected from the fresh `ann_ready` statistics in the same run; timing samples are unchanged. The benchmark helper now opens the published generation for its statistics, verified on a fresh smaller ANN index.
