@@ -41,7 +41,12 @@ async def main():
             assert search_tool.inputSchema["properties"]["folder"].get("default") is None
             assert {"subject", "recipient", "cursor"} <= set(search_tool.inputSchema["properties"])
             assert "metadata" in search_tool.description and "thread" in search_tool.description
-            assert set(names) == {"search_emails", "index_status", "get_indexed_mail", "sync_emails", "optimize_index", "list_outlook_sources", "maintain_index", "start_sync_job", "sync_job_status", "cancel_sync_job", "list_sync_failures", "retry_failed_emails", "get_sync_progress", "get_mail_thread"}
+            from outlook_rag.server import STANDARD_TOOLS
+            profile = json.loads(config_path.read_text(encoding='utf-8-sig')).get('mcp_tool_profile', 'standard')
+            expected = STANDARD_TOOLS if profile == 'standard' else set(__import__('outlook_rag.app', fromlist=['_tools'])._tools)
+            assert set(names) == expected
+            sync_status = payload(await session.call_tool("sync_index", {"action": "status"}))
+            assert "folder_progress" in sync_status
             status = payload(await session.call_tool("index_status", {}))
             assert status["emails"] > 0
             attributes = payload(await session.call_tool("search_emails", {"query": "", "mode": "metadata", "limit": 1}))

@@ -137,7 +137,7 @@ def index_coverage(sql: sqlite3.Connection | None, cfg: dict) -> dict:
         pending_folder_count=len(pending),
         pending_folders=pending[:20],
         retained_failures=failed,
-        next_action="Verify connected stores with list_outlook_sources. To index all connected PST archives, use sync_emails or start_sync_job with folders=['auto'], since_days=0.",
+        next_action="Verify connected stores with list_outlook_sources. To index all connected PST archives, use sync_index(action='start') with folders=['auto'], since_days=0.",
     )
 
 

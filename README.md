@@ -54,50 +54,54 @@ For offline startup, replace `@v0.8.0` with the full commit SHA shown on GitHub,
 
 ## Usage
 
-1. Call `start_sync_job` for bulk indexing. It returns a `job_id` promptly and continues through bounded sync cycles in a separate process. Call `sync_job_status` to inspect progress, or `cancel_sync_job` to request a safe stop.
+1. Call `sync_index(action="start")` for indexing. It returns a `job_id` promptly and continues in a separate process. Call `sync_index(action="status", job_id=...)` to inspect progress, or `sync_index(action="cancel", job_id=...)` to request a safe stop. With no arguments, `sync_index` reports the latest job; it never starts indexing implicitly.
 2. Call `search_emails` with a natural-language query, then `get_indexed_mail` to read a result.
 
 Ordinary mail lookups should leave `folder`, `since` and `until` unset so search spans all indexed stores, including older mail in connected PST archives. An inbox-only live lookup can miss archived mail. Search responses report `search_scope` and `coverage`; zero hits do not establish absence from unindexed archives. Before answering that mail was not found, compare `index_status` with `list_outlook_sources`, which checks currently connected stores and pending PST folders without reading bodies or requesting embeddings.
 
-If archives have not been indexed, explicitly run `start_sync_job(folders=["auto"], since_days=0)` or repeat bounded `sync_emails` with the same arguments. `["auto"]` overrides an inbox-only `OUTLOOK_RAG_FOLDERS` setting and discovers all connected stores; explicit excluded/system/search folders remain excluded. `search_emails` searches existing indexed mail immediately and does not start a bulk job. An existing job can be reused, so check its `options` to confirm it covers all stores. Restart the MCP server after upgrading to reload the all-store search guidance. A client pinned to an older Git tag continues to use that tag's code.
-3. Call `sync_emails` again when you want to include new or changed mail. Sync does not run automatically.
+If archives have not been indexed, explicitly run `sync_index(action="start", folders=["auto"], since_days=0)`. `["auto"]` overrides an inbox-only `OUTLOOK_RAG_FOLDERS` setting and discovers all connected stores; explicit excluded/system/search folders remain excluded. `search_emails` searches existing indexed mail immediately and does not start a bulk job. An existing job can be reused, so check its `options` to confirm it covers all stores. Restart the MCP server after upgrading to reload the all-store search guidance. A client pinned to an older Git tag continues to use that tag's code.
+3. Call `sync_index(action="start")` again when you want to include new or changed mail. Sync does not run automatically.
 
-For a smaller sync, call `sync_emails` with `{"max_total_emails": 10}`. After bulk indexing, call `optimize_index` to build the vector search index.
+For a smaller foreground sync, use `outlook-rag sync --max-total-emails 10`. After bulk indexing, use `outlook-rag optimize` to build the vector search index. These commands are available through the same uvx installation command with the subcommand appended.
 
 Background jobs survive MCP disconnects. Only one bulk worker runs per database; another start returns the existing job. Cancellation is cooperative, so an in-flight Outlook/API call may finish first. After a computer restart or an interrupted worker, start another job to resume saved checkpoints and cached embeddings. A `completed_with_errors` result means some mail or folders still need attention.
 
 Jobs track folders by store/folder ID. A renamed folder retains its progress and updates cached paths when scanned. If an unfinished folder disappears or its PST is disconnected, the job ends as `completed_with_errors` with `reason=folder_unavailable` and `missing_folders` identifying the affected scope.
 
-`sync_emails` remains available for small foreground updates. Its default limits are 200 mail attempts, 2,000 new metadata rows and a 30-second cooperative budget. Bulk jobs use the same settings and immediately start the next cycle when needed. While embedding requests run, sync reads ahead up to 16 additional rows on the Outlook thread. Set `OUTLOOK_RAG_SYNC_PREFETCH_EMAILS=0` to disable it.
+The CLI `sync` command remains available for small foreground updates. Its default limits are 200 mail attempts, 2,000 new metadata rows and a 30-second cooperative budget. Bulk jobs use the same settings and immediately start the next cycle when needed. While embedding requests run, sync reads ahead up to 16 additional rows on the Outlook thread. Set `OUTLOOK_RAG_SYNC_PREFETCH_EMAILS=0` to disable it.
 
 Worker status includes a local `log_path` and the last 20 diagnostic events. Logs include timestamps, progress counters, safe error codes and stack frame locations. Raw exception messages, stdout/stderr, provider bodies and credentials are not persisted. Import/configuration failures are recorded by a stdlib bootstrap before the application loads; a hard kill is still reported as interrupted. Logs are bounded to about 1 MiB per job, and maintenance removes inactive logs older than 14 days.
 
-Failures are retained for later retry and counted by `index_status`. Use `maintain_index` when you want to remove unused embedding caches and compact vector storage; recent versions are retained for seven days.
+Failures are retained for later retry and counted by `index_status`. Use `outlook-rag maintain` when you want to remove unused embedding caches and compact vector storage; recent versions are retained for seven days.
 
 With an existing matching index, cached operations and maintenance recover dimensions locally when the embedding API is unavailable. Semantic searches need the API only for an uncached query. Lexical and identifier searches need no embeddings unless `min_similarity` is set. Initial indexing needs the API; MCP startup still requires configured API credentials. A saved job snapshot also allows status and cancellation before database initialization. Omitting a job ID selects the most recently created job.
 
+The default MCP surface has six tools:
+
 | Tool | Purpose |
 | --- | --- |
-| `sync_emails` | Update the local mail index |
-| `list_sync_failures` | Inspect failed mail IDs, causes and retry schedules |
-| `retry_failed_emails` | Retry only selected failed emails |
-| `get_sync_progress` | Inspect folder progress, rate and estimated remaining time |
-| `start_sync_job` | Start continuous background bulk indexing |
-| `sync_job_status` | Inspect the latest or specified bulk job |
-| `cancel_sync_job` | Request a safe stop while retaining completed work |
-| `search_emails` | Search by meaning and keywords, with metadata filters |
-| `get_indexed_mail` | Read a cached email body |
-| `get_mail_thread` | Read cached preceding/following mail in the same conversation |
-| `index_status` | Check indexed counts and sync progress |
-| `list_outlook_sources` | Inspect connected stores, folders, and PST/OST paths |
-| `optimize_index` | Build a vector search index from at least 256 chunks |
-| `maintain_index` | Prune unused caches and compact local vector storage |
+| `search_emails` | Search all indexed stores/PSTs by content or attributes |
+| `get_indexed_mail` | Read a cached original email body |
+| `get_mail_thread` | Read preceding/following originals in the same conversation |
+| `index_status` | Check indexed counts, coverage and folder progress |
+| `list_outlook_sources` | Inspect currently connected stores, folders and PST/OST paths |
+| `sync_index` | Start, inspect or cancel background indexing (`action`) |
+
+Maintenance and recovery remain available in the CLI. Set `OUTLOOK_RAG_MCP_TOOL_PROFILE=full` (or `mcp_tool_profile: "full"` in the server config) and restart the MCP server to expose all 15 adapters, including the original 14 names. This supports existing clients using `sync_emails`, `start_sync_job`, `sync_job_status` and `cancel_sync_job`. `standard` is the default; it consolidates overlapping sync operations and hides maintenance choices from ordinary searches. No cached data or maintenance functionality is removed.
+
+| Additional tool in full profile | CLI equivalent |
+| --- | --- |
+| `sync_emails` | `sync` (bounded foreground update) |
+| `start_sync_job` / `sync_job_status` / `cancel_sync_job` | `job start` / `job status` / `job cancel` |
+| `get_sync_progress` | `progress` |
+| `list_sync_failures` / `retry_failed_emails` | `failures list` / `failures retry` |
+| `optimize_index` / `maintain_index` | `optimize` / `maintain` |
 
 ## Recovery, progress and threads
 
-Use `list_sync_failures` to inspect causes and retry schedules, then pass its `mail_id` values to `retry_failed_emails(mail_ids=[...])`. The retry bypasses backoff for only those IDs; another sync owning the DB returns `busy` without changing retry state. Old failure records gain detailed causes after another attempt. Failure lists, saved progress and cached thread context remain available without the embedding API; automatic dimensions are recovered from the matching index. Provider response bodies and credentials are never stored as error details.
+Use `outlook-rag failures list` to inspect causes and retry schedules, then pass its `mail_id` values to `outlook-rag failures retry <mail-id> ...`. The full MCP profile also exposes `list_sync_failures` and `retry_failed_emails`. The retry bypasses backoff for only those IDs; another sync owning the DB returns `busy` without changing retry state. Old failure records gain detailed causes after another attempt. Failure lists, saved progress and cached thread context remain available without the embedding API; automatic dimensions are recovered from the matching index. Provider response bodies and credentials are never stored as error details.
 
-`get_sync_progress`, `index_status` and `sync_job_status` expose per-folder indexed/failed counts, scan progress, processing rate and ETA. Remaining counts use Outlook item-count estimates, which can include non-mail items. ETA is `null` when the scope or rate is unknown, including incomplete checkpoints from older versions. A completed scan may still have failed mail to recover. These status calls use saved snapshots and make no live Outlook calls.
+`index_status`, `sync_index(action="status")` and CLI `progress` expose per-folder indexed/failed counts, scan progress, processing rate and ETA. Remaining counts use Outlook item-count estimates, which can include non-mail items. ETA is `null` when the scope or rate is unknown, including incomplete checkpoints from older versions. A completed scan may still have failed mail to recover. These status calls use saved snapshots and make no live Outlook calls.
 
 Use `search_emails(min_similarity=0.6)` to exclude chunks below a cosine similarity threshold, including BM25-only candidates. The default is `None`, preserving relative ranking; calibrate a threshold for your model rather than interpreting the score as a confidence probability. Long chunks return a plain-text window around a query match when available.
 
@@ -122,14 +126,20 @@ Only the model and API credentials are required. Other settings have defaults:
 | Setting | Default |
 | --- | --- |
 | Mail scope | All dates and connected mail folders; system/search folders excluded |
-| Database | `%USERPROFILE%\Documents\Outlookファイル\outlook-rag\<model>-<dimensions>d-<settings-id>` |
+| Database | New sync: alongside connected PSTs, in `outlook-rag\<model>-<dimensions>d-<settings-id>`; reuse existing indexes |
 | Embedding requests | Up to 8 chunks per batch, 2 requests concurrently |
 | Sync limits | 200 mail attempts, 2,000 new metadata rows, 30 seconds |
 | Vector dimensions | Up to 1,024 for Qwen3-Embedding; full dimensions for other models |
 
 Qwen3-Embedding requests reduced dimensions from the API when possible, falling back to local truncation if the route rejects or ignores the request. Stored vector dimensions do not change. Backend setup is described in [VLLM-TUNING.md](VLLM-TUNING.md).
 
-New folders include a Windows-safe model name and stored dimensions; the trailing settings ID separates different embedding/chunk settings. Existing hash-only default folders in Documents or Local AppData remain in use until explicitly moved. `OUTLOOK_RAG_DATA_DIR` always overrides the default. The database location does not determine where Outlook reads PST/OST files; connected stores are discovered through Outlook.
+New folders include a Windows-safe model name and stored dimensions; the trailing settings ID separates different embedding/chunk settings. Existing default folders in Documents or Local AppData remain in use until explicitly relocated. `OUTLOOK_RAG_DATA_DIR` always overrides the default. The database location does not determine where Outlook reads PST/OST files; connected stores are discovered through Outlook.
+
+For a new index, sync reads connected Outlook store paths once. If all PSTs share one directory, it creates the index under `<PST-directory>\outlook-rag\<model>-<dimensions>d-<settings-id>`. Multiple PSTs in that directory share one index across all stores. If PSTs are in different directories, set `OUTLOOK_RAG_DATA_ROOT` to one chosen index root, for example `D:\Mail\outlook-rag`, and retry. This selects storage only; all configured Outlook sources remain searchable. With no connected PST, the fallback is `%USERPROFILE%\Documents\Outlookファイル\outlook-rag`.
+
+Automatic placement is remembered under `%LOCALAPPDATA%\outlook-rag\locations` (separately for environment-only setup and each config file). Cached search, status and cancellation do not inspect Outlook paths; disconnecting a PST does not switch the DB. Existing indexes or saved worker snapshots are reused before first choosing a location; after that, the saved root stays selected. A corrupt or inaccessible saved location raises an error instead of selecting another DB. API keys stay in Local AppData.
+
+To relocate an existing index beside a PST, stop the server and workers, back up/restore the complete SQLite + vectors pair using the CLI, then set `OUTLOOK_RAG_DATA_DIR` to the reported restored directory. Changing only `DATA_ROOT` selects a different index; it does not move existing data. Relative `data_root` in a config resolves from that file's directory.
 
 Changing the embedding model requires re-indexing. With the default database location, a separate index is selected automatically. If you set `OUTLOOK_RAG_DATA_DIR`, use a new directory for the new model.
 
@@ -139,7 +149,7 @@ See [Configuration](CONFIGURATION.md) for optional settings and [opencode.exampl
 
 The server does not modify Outlook mail. Email text and vectors are stored locally; cleaned text and queries are sent to your configured embedding API.
 
-Only indexed mail is searchable. Attachments, New Outlook, and disconnected PST files are not supported. Deleted or moved mail is removed from the local index by `sync_emails` with `reconcile=true` after a complete scan.
+Only indexed mail is searchable. Attachments, New Outlook, and disconnected PST files are not supported. Deleted or moved mail is removed from the local index by `sync_index(action="start", reconcile=true)` after a complete scan.
 
 ## Development
 
@@ -179,7 +189,7 @@ uv run --frozen outlook-rag restore-index C:\backups\outlook-rag-20261013 C:\ind
 
 SQLite (`metadata.sqlite`) holds mail, chunks, lexical indexes, embedding caches and publication state. LanceDB (`vectors/`) is a derived index. Both are embedded local databases; no DB service is required. `doctor` checks SQLite, chunk/vector IDs, lexical coverage and cached embeddings. `backup-index` captures the SQLite backup and its vector generation under the writer/reader locks. Backups contain private mail; choose an appropriately protected location outside `data_dir`. Backup and restore destinations must be new directories. Restore verifies the pair and never replaces an existing index; set `data_dir` to the reported restored directory to use it.
 
-`rebuild-vectors` reconstructs vector metadata, ANN (from 256 chunks), lexical and identifier indexes from cached chunks/embeddings, then atomically publishes the new table. It requires no API key or Outlook connection and leaves the existing publication intact on failure. Missing or invalid cached embeddings require a re-sync; it does not guess replacements. Keep a paired backup before maintenance. Old vector generations remain until `maintain_index` runs; rebuilding temporarily requires space for another vector index. Maintenance removes unused generations while protecting readers. Rebuild/backup/restore/doctor are CLI commands; the MCP tool count remains fourteen.
+`rebuild-vectors` reconstructs vector metadata, ANN (from 256 chunks), lexical and identifier indexes from cached chunks/embeddings, then atomically publishes the new table. It requires no API key or Outlook connection and leaves the existing publication intact on failure. Missing or invalid cached embeddings require a re-sync; it does not guess replacements. Keep a paired backup before maintenance. Old vector generations remain until CLI `maintain` runs; rebuilding temporarily requires space for another vector index. Maintenance removes unused generations while protecting readers. Rebuild/backup/restore/doctor remain CLI commands; the default MCP surface contains six tools.
 
 Use `outlook-rag --help`, `outlook-rag job --help` and `outlook-rag failures --help` for options. Commands return JSON; no command starts MCP stdio.
 

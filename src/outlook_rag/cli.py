@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from . import features, jobs, storage, threads
+from . import features, jobs, storage, threads, server
 
 
 def main(backend: Any) -> None:
@@ -213,6 +213,7 @@ def main(backend: Any) -> None:
     elif args.command == "restore-index":
         result = storage.restore_index(cfg, args.source, args.destination)
     else:
+        server.configure_tools(backend.mcp, backend._tools, cfg.get("mcp_tool_profile", "standard"))
         if cfg.get("warmup_on_start", True):
             backend.threading.Thread(
                 target=backend.warmup_embedding_api, daemon=True

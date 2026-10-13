@@ -238,7 +238,7 @@ def search(
                 {
                     "items": [],
                     "count": 0,
-                    "note": "Index empty: run sync_emails first.",
+                    "note": "Index empty: use sync_index(action='start') first.",
                 }
             )
         sql, table = storage.open_index(cfg)
@@ -248,7 +248,7 @@ def search(
                     {
                         "items": [],
                         "count": 0,
-                        "note": "Index empty: run sync_emails first.",
+                        "note": "Index empty: use sync_index(action='start') first.",
                     },
                     sql,
                 )
@@ -520,7 +520,7 @@ def search(
                         and time_limited,
                         "grouped_by_thread": group_by_thread,
                         "source": "local_index",
-                        "freshness": "As of last sync; run sync_emails to refresh.",
+                        "freshness": "As of last sync; use sync_index(action='start') to refresh.",
                     },
                     sql,
                 )

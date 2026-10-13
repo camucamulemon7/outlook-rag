@@ -80,7 +80,7 @@ def open_index(cfg: dict, *, writable: bool = True) -> tuple[sqlite3.Connection,
 
     path = Path(cfg["data_dir"]) / "metadata.sqlite"
     if not path.is_file():
-        raise ValueError("Index not initialized. Run sync_emails first.")
+        raise ValueError("Index not initialized. Use sync_index(action='start') first.")
     mode = "rw" if writable else "ro"
     sql = sqlite3.connect(
         path.resolve().as_uri() + "?mode=" + mode, uri=True, timeout=5
@@ -298,7 +298,7 @@ def rebuild_vectors(cfg: dict) -> dict:
                 rows=expected,
                 embedding_requests=0,
                 metadata_filters=True,
-                note="Previous generations remain until maintain_index; keep a backup of SQLite and vectors together.",
+                note="Previous generations remain until CLI maintain; keep a backup of SQLite and vectors together.",
             )
         finally:
             if not published:

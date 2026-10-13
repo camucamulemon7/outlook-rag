@@ -24,7 +24,7 @@ from lancedb.index import IvfHnswFlat
 from filelock import FileLock
 from mcp.server.fastmcp import FastMCP
 
-from . import cli, coverage, jobs, search as search_engine, server, storage, threads
+from . import cli, coverage, jobs, search as search_engine, server, storage, threads, paths
 from .features import local_config, stored_sql, folder_progress, failure_reason
 from .outlook import (
     safe_attr as safe_attr,
@@ -111,7 +111,7 @@ def config(*, resolve_dimensions: bool = True) -> dict:
                   "embedding_request_dimensions": int, "query_cache_size": int,
                   "search_candidates": int, "rrf_k": int, "semantic_weight": float, "lexical_weight": float,
                   "search_nprobes": int, "search_ef": int, "search_exact": json.loads}
-    fields = ("embedding_url", "model", "data_dir", "key_file", "api_key_env", "query_instruction", "query_prefix", "document_prefix", "model_revision", "search_mode", *converters)
+    fields = ("embedding_url", "model", "data_dir", "data_root", "mcp_tool_profile", "key_file", "api_key_env", "query_instruction", "query_prefix", "document_prefix", "model_revision", "search_mode", *converters)
     for field in fields:
         value = os.environ.get("OUTLOOK_RAG_" + field.upper())
         if value is not None:
@@ -121,10 +121,12 @@ def config(*, resolve_dimensions: bool = True) -> dict:
     cfg.setdefault("embedding_url", "http://localhost:8080/api/v1/embeddings")
     automatic_data_dir = not cfg.get("data_dir")
     cfg["_automatic_data_dir"] = automatic_data_dir
-    local_root = Path(os.environ["LOCALAPPDATA"]) if os.environ.get("LOCALAPPDATA") else Path.home() / "AppData" / "Local"
+    local_root = paths.local_root()
     if automatic_data_dir:
-        index_root = Path.home() / "Documents" / "Outlook\u30d5\u30a1\u30a4\u30eb" / "outlook-rag"
-        cfg["data_dir"] = str(index_root / "pending")
+        cfg["data_dir"] = str(paths.default_root() / "pending")
+    cfg.setdefault("mcp_tool_profile", "standard")
+    if cfg["mcp_tool_profile"] not in {"standard", "full"}:
+        raise ValueError("mcp_tool_profile must be standard or full")
     cfg.setdefault("key_file", str(local_root / "outlook-rag" / "api-key.dpapi"))
     cfg.setdefault("folders", "auto")
     cfg["folders"] = coverage.folder_selection(cfg["folders"])
@@ -169,7 +171,7 @@ def config(*, resolve_dimensions: bool = True) -> dict:
         raise ValueError("folders must be 'auto' or a JSON array of folder paths")
     if not isinstance(cfg["excluded_folders"], list):
         raise ValueError("excluded_folders must be a JSON array of wildcard paths")
-    for field in ("data_dir", "key_file"):
+    for field in ("data_dir", "data_root", "key_file"):
         if cfg.get(field):
             field_path = Path(os.path.expandvars(cfg[field])).expanduser()
             cfg[field] = str(field_path if field_path.is_absolute() else config_path.parent / field_path)
@@ -197,15 +199,7 @@ def config(*, resolve_dimensions: bool = True) -> dict:
     if not 1600 <= cfg["embedding_max_batch_chars"] <= 262144:
         raise ValueError("embedding_max_batch_chars must be 1600..262144")
     if automatic_data_dir:
-        digest = hashlib.sha256(index_identity(cfg).encode()).hexdigest()[:12]
-        model_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", cfg["model"]).strip(" .")[:80].rstrip(" .") or "model"
-        if model_name.split(".")[0].upper() in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}:
-            model_name = "model_" + model_name
-        stored_dimensions = vector_dimensions(cfg) if cfg.get("dimensions") else "auto"
-        preferred = index_root / f"{model_name}-{stored_dimensions}d-{digest}"
-        # Prefer a readable name for new indexes; never move an active database.
-        previous = [preferred, index_root / digest, local_root / "outlook-rag" / digest]
-        cfg["data_dir"] = str(next((folder for folder in previous if (folder / "metadata.sqlite").is_file()), preferred))
+        cfg = paths.select(cfg, paths.configure(cfg, config_path, from_file=bool(path)))
     return cfg
 
 def detect_dimensions(cfg: dict) -> int:
@@ -723,6 +717,7 @@ def sync(folders: list[str] | None = None, max_emails: int | None = None, since_
         raise ValueError("Invalid time or scan limits")
     if not isinstance(since_days, int) or not 0 <= since_days <= 36500:
         raise ValueError("since_days must be 0 (all time), 'all', or 1..36500")
+    cfg = paths.prepare(cfg)
     started = time.perf_counter()
     deadline = started + max_seconds
     cancelled = _cancel_check or (lambda: False)
@@ -1108,7 +1103,7 @@ def search(query: str, limit: int = 10, folder: str | None = None, sender: str |
 def status() -> dict:
     cfg = local_config()
     if not cfg.get('dimensions'):
-        raise ValueError('Index not initialized. Run sync_emails with the embedding API available first.')
+        raise ValueError('Index not initialized. Run sync_index(action="start") with the embedding API available first.')
     with _LOCK:
         sql, table = storage.open_index(cfg, writable=False)
         try:
@@ -1236,6 +1231,7 @@ list_sync_failures = _tools['list_sync_failures']
 retry_failed_emails = _tools['retry_failed_emails']
 get_sync_progress = _tools['get_sync_progress']
 get_mail_thread = _tools['get_mail_thread']
+sync_index = _tools['sync_index']
 
 def main() -> None:
     cli.main(sys.modules[__name__])

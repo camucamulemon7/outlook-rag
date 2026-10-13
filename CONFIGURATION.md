@@ -18,7 +18,9 @@ Set `OUTLOOK_RAG_EMBEDDING_URL` if your endpoint differs from the default. As an
 | OUTLOOK_RAG_EMBEDDING_URL | http://localhost:8080/api/v1/embeddings |
 | OUTLOOK_RAG_DIMENSIONS | Detect API output dimensions on the first request; reuse within the process |
 | OUTLOOK_RAG_STORAGE_DIMENSIONS | Up to 1024 for Qwen3-Embedding; full API output dimensions for other models |
-| OUTLOOK_RAG_DATA_DIR | %USERPROFILE%\Documents\Outlookファイル\outlook-rag\<model>-<dimensions>d-<settings-id> |
+| OUTLOOK_RAG_DATA_DIR | Exact index directory override; otherwise reuse existing indexes or choose alongside PSTs before first sync |
+| OUTLOOK_RAG_DATA_ROOT | Optional root for model-specific indexes, e.g. D:\Mail\outlook-rag; choose one for PSTs in different directories |
+| OUTLOOK_RAG_MCP_TOOL_PROFILE | standard: six usual tools; full: all 15 including original adapters |
 | OUTLOOK_RAG_KEY_FILE | %LOCALAPPDATA%\outlook-rag\api-key.dpapi |
 | OUTLOOK_RAG_FOLDERS | auto: recursively discover connected Outlook mail folders |
 | OUTLOOK_RAG_SINCE_DAYS | 0: all dates; "all" is also accepted |
@@ -56,11 +58,11 @@ Set `OUTLOOK_RAG_EMBEDDING_URL` if your endpoint differs from the default. As an
 
 `OUTLOOK_RAG_FOLDERS` and `OUTLOOK_RAG_EXCLUDED_FOLDERS` accept JSON array strings. For example, set `OUTLOOK_RAG_EXCLUDED_FOLDERS` to `["*/Advertisements","*/RSS Feeds"]`. Exclusions support wildcard paths. Search folders are always excluded from automatic discovery to avoid duplicate indexing.
 
-For ordinary email searches, omit `folder`, `since` and `until` unless the user explicitly narrows the scope. Searches include all indexed stores and PST archives even if configured synchronization is limited to `["inbox"]`. Configuration controls which folders get indexed; it does not silently filter existing search results. Use `folders=["auto"]`, `since_days=0` with `sync_emails` or `start_sync_job` to index all connected PST stores despite an inbox-only setting; CLI equivalent: `job start --folders auto --since-days 0`. Use `["auto"]` alone, not mixed with paths. Named exclusions still apply.
+For ordinary email searches, omit `folder`, `since` and `until` unless the user explicitly narrows the scope. Searches include all indexed stores and PST archives even if configured synchronization is limited to `["inbox"]`. Configuration controls which folders get indexed; it does not silently filter existing search results. Use `folders=["auto"]`, `since_days=0` with `sync_index(action="start")` to index all connected PST stores despite an inbox-only setting; CLI equivalent: `job start --folders auto --since-days 0`. Use `["auto"]` alone, not mixed with paths. Named exclusions still apply.
 
 `search_scope` reports the applied folder/date filters. `coverage` describes the last saved sync inventory, known PST stores and pending scans; it does not claim to have checked live Outlook during search. `index_status.search_coverage` exposes the same summary. Older inventories without complete scope metadata are reported as unknown. `list_outlook_sources` reads currently connected store/folder metadata and compares it with all-date checkpoints, reporting unindexed archives, discovery errors and retained failures. Zero results include `absence_confirmed=false`; check coverage before concluding that a message does not exist. Connected PSTs must be indexed; disconnected PSTs cannot be read from Outlook. MCP tool descriptions and initialization instructions request all-store search by default, but clients must load the updated server rather than an older pinned Git tag.
 
-Startup does not perform full indexing or schedule synchronization. Call `sync_emails` to update the database. For a small batch, pass `{"max_total_emails": 10, "max_seconds": 5, "max_scanned": 100}`. Repeat until folder windows are complete and no folders remain pending. Folders rotate between calls so large folders do not starve smaller ones.
+Startup does not perform full indexing or schedule synchronization. Call `sync_index(action="start")` to update the database. For a small foreground batch, use CLI `sync --max-total-emails 10 --max-seconds 5 --max-scanned 100` (or `sync_emails` in the full MCP profile). Repeat until folder windows are complete and no folders remain pending. Folders rotate between calls so large folders do not starve smaller ones.
 
 Mail attempts include retries and failed reads, not just successful updates. Metadata uses Outlook GetTable/GetArray where available; unsupported providers fall back to Items. Checkpoints are saved after successful batches. Incremental filters and reconciliation progress survive bounded calls.
 
@@ -70,13 +72,13 @@ Unreadable mail and permanent input errors are retained for retry with increasin
 
 Completed embedding requests are cached immediately, including successful requests already in flight when another request fails. A retry reuses those chunks after a process restart. Interrupted mail updates keep the previous searchable version until all replacement chunks are ready. Maintenance retains caches referenced by unfinished mail batches; references are released when a mail is published or its pending content is replaced.
 
-For bulk indexing, call `start_sync_job` once, then inspect `sync_job_status`. The detached worker repeats bounded sync cycles without agent/tool invocation gaps. It survives MCP disconnects and keeps one worker per database. `cancel_sync_job` requests cooperative cancellation while retaining indexed mail, checkpoints and completed embeddings. Existing sync settings apply; no additional settings are required. Startup alone does not launch a bulk job.
+For indexing, call `sync_index(action="start")` once, then inspect `sync_index(action="status")`. The detached worker repeats bounded sync cycles without agent/tool invocation gaps. It survives MCP disconnects and keeps one worker per database. `sync_index(action="cancel")` requests cooperative cancellation while retaining indexed mail, checkpoints and completed embeddings. Existing sync settings apply; no additional settings are required. Startup alone does not launch a bulk job.
 
 Job records and resolved settings are stored under `<data_dir>/jobs`. API key environment values are inherited by the worker and are not written into job snapshots. Encrypted key-file paths are retained. Worker crashes/computer restarts are reported as interrupted; start another job to resume the index. Jobs with failed mail/folders end as completed_with_errors; repeated provider outages or lack of progress end as blocked. No automatic ANN rebuild or continuous mail monitoring is performed by a bulk job.
 
 Job diagnostics are stored in `<data_dir>/jobs/<job_id>.log` and exposed as `log_path` / `recent_logs` by status. Failed jobs include a sanitized `error_detail`. Progress and exception stack locations are recorded without raw messages, source lines, stdout/stderr or API credentials. A stdlib bootstrap records import/configuration and Windows environment-transfer errors. Each log is bounded to about 1 MiB; inactive logs older than 14 days are pruned by maintenance.
 
-`maintain_index` prunes unused document embedding caches, enforces the query cache limit, and compacts vector storage while retaining versions for seven days. It does not delete mail or current chunks.
+CLI `maintain` prunes unused document embedding caches, enforces the query cache limit, and compacts vector storage while retaining versions for seven days. It does not delete mail or current chunks.
 
 Server-side dimension requests do not change index identity: full output is still detected as the model's native dimension, and stored dimensions remain fixed. Unsupported dimension requests fall back once per process. Only request reduced dimensions from models that support MRL.
 
@@ -110,7 +112,13 @@ Folder counts come from Outlook's `Items.Count` and may include non-mail items. 
 
 ## Database changes and authentication
 
-New indexes default to `%USERPROFILE%\Documents\Outlookファイル\outlook-rag\<model>-<dimensions>d-<settings-id>`. The model name is sanitized for Windows and stored dimensions are visible; the settings ID prevents mixing embedding/chunk configurations. Existing hash-only default indexes in Documents or Local AppData remain in use, with the new named location taking precedence if it exists. Explicit `OUTLOOK_RAG_DATA_DIR` values are unchanged. API key files remain under Local AppData. To relocate an existing index, stop its MCP and background workers, move the complete index directory, and set `OUTLOOK_RAG_DATA_DIR` to the new path.
+Existing default indexes and pending worker snapshots are reused before first selecting a location. Once a root is saved, that location remains selected even if its drive is temporarily disconnected. Before creating a new automatic index, sync inspects connected store file paths only. If PSTs share one parent directory, the new root is `<PST-directory>\outlook-rag`; multiple PST directories require one explicit `OUTLOOK_RAG_DATA_ROOT`. With no PST, the fallback remains `%USERPROFILE%\Documents\Outlookファイル\outlook-rag`. All stores still share one index per model/settings; DB placement does not restrict search sources.
+
+Each root contains `<model>-<dimensions>d-<settings-id>`. The model name is sanitized for Windows; the ID separates embedding/chunk settings. Automatic placement is saved under Local AppData `outlook-rag/locations`, scoped to environment-only setup or the absolute config filename, and reused offline without Outlook calls. Explicit `DATA_ROOT` overrides automatic root/legacy lookup and is useful for choosing one PST directory; explicit `DATA_DIR` overrides both and selects an exact index directory. Neither setting moves existing data. A broken saved location fails clearly instead of silently selecting another DB. API keys remain in Local AppData.
+
+To relocate an existing index, stop its MCP and background workers, use `backup-index` and `restore-index` to preserve the SQLite/vector pair, then set `OUTLOOK_RAG_DATA_DIR` to the reported restored directory. Do not copy only `metadata.sqlite` or only `vectors`.
+
+The default MCP profile exposes `search_emails`, `get_indexed_mail`, `get_mail_thread`, `index_status`, `list_outlook_sources` and `sync_index`. `sync_index` defaults to status; use explicit `action=start/status/cancel`. Job IDs apply to status/cancel; folder/date/reconcile options apply only to start. Maintenance/recovery remain CLI commands. `OUTLOOK_RAG_MCP_TOOL_PROFILE=full` (JSON `mcp_tool_profile: "full"`) exposes all 15 adapters, including old tool names for compatibility. Restart the MCP process/client after changing the profile.
 
 Changing the model, vector dimensions, chunking, or other index identity settings requires re-indexing. The default database path selects a separate index automatically. If `OUTLOOK_RAG_DATA_DIR` is fixed, choose a new directory for the new settings.
 
@@ -118,11 +126,11 @@ SQLite now records the LanceDB version published with each mail/chunk transactio
 
 SQLite is the canonical local database; LanceDB is a rebuildable vector index. No persistent DB service is needed. `doctor`, `backup-index`, `restore-index`, `rebuild-vectors`, `optimize` and `maintain` use saved dimensions and require no API credentials. Back up both stores together with `backup-index <new-directory>`; copying only a live SQLite file misses its WAL and the matching vector generation. Restore with `restore-index <backup> <new-directory>` and update `data_dir` afterward. The destinations must not exist; backup cannot be inside `data_dir`. These commands exclude credentials and worker jobs.
 
-`rebuild-vectors` validates every cached chunk vector, builds a separate vector table with metadata and indexes, repairs lexical/identifier indexes, then publishes the table name/version in one SQLite transaction. It also upgrades legacy tables without re-embedding. Failure keeps the old publication. Missing or invalid cached vectors require re-syncing the affected content; doctor reports whether an offline rebuild is possible. Old generations consume disk until `maintain_index` removes them under the reader lock. Stop older application versions before using the new generation marker.
+`rebuild-vectors` validates every cached chunk vector, builds a separate vector table with metadata and indexes, repairs lexical/identifier indexes, then publishes the table name/version in one SQLite transaction. It also upgrades legacy tables without re-embedding. Failure keeps the old publication. Missing or invalid cached vectors require re-syncing the affected content; doctor reports whether an offline rebuild is possible. Old generations consume disk until CLI `maintain` removes them under the reader lock. Stop older application versions before using the new generation marker.
 
 Offline automatic index discovery logs unreadable SQLite/JSON/snapshot candidates and continues to a valid matching index. An explicitly selected damaged directory, or no usable match with damaged candidates present, produces a recovery error. Model/settings matching and ambiguous-dimension checks still apply.
 
-The CLI also accepts `--config <path>`; MCP environment variables override values in that file. Relative database and key-file paths in a config file are resolved against its directory.
+The CLI also accepts `--config <path>`; MCP environment variables override values in that file. Relative database, data-root and key-file paths in a config file are resolved against its directory.
 
 To store an encrypted API key interactively, run `outlook-rag set-key` with the desired settings. Input is hidden. DPAPI keys can be decrypted only by the Windows user who saved them; save the key again on another computer or account.
 
@@ -132,7 +140,7 @@ Search filters are evaluated against matching SQL/vector snapshots. New and rebu
 
 `search_emails` and CLI `search --min-similarity` accept an optional cosine lower bound from -1 to 1. The default is unset. BM25 candidates also receive a measured cosine similarity when filtering is enabled. Calibrate thresholds with your model; scores are not probabilities. Snippets prefer query context within the matched chunk and remain plain text. Filtering occurs before grouping and can legitimately return zero results.
 
-CLI `job start/status/cancel`, `failures list/retry`, `progress` and `thread` reuse MCP operations and return JSON. Cached reads and cancellation recover dimensions locally and need no API key. Job start/retry use the configured provider credentials. `--config` precedes the subcommand; `--help` is available for each command group.
+CLI `job start/status/cancel`, `failures list/retry`, `progress` and `thread` reuse the same underlying operations as MCP and return JSON. Cached reads and cancellation recover dimensions locally and need no API key. Job start/retry use the configured provider credentials. `--config` precedes the subcommand; `--help` is available for each command group.
 
 CLI `search --mode lexical` and `search --mode identifier` need no provider unless `--min-similarity` requests a cosine check. Identifier search accepts exactly one complete ASCII letter/digit ID with `-` or `_`, such as `HT-5639`, and orders exact matches by received date. Unknown IDs return zero results. `auto` chooses this path for one unambiguous positive ID and otherwise semantic search; multiple IDs and common negation phrases are left to semantic retrieval. Auto is opt-in and is a heuristic, not a Boolean parser. Without a calibrated threshold, natural-language searches can return irrelevant relative neighbors.
 

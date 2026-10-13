@@ -84,7 +84,9 @@ async def offline_mcp(config_path, mail_id, job_id):
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = await session.list_tools()
-            assert len(tools.tools) == 14
+            from outlook_rag.server import STANDARD_TOOLS
+            profile = json.loads(config_path.read_text(encoding='utf-8-sig')).get('mcp_tool_profile', 'standard')
+            assert {tool.name for tool in tools.tools} == (set(app._tools) if profile == 'full' else STANDARD_TOOLS)
             search_tool = next(t for t in tools.tools if t.name == 'search_emails')
             assert {'subject', 'recipient', 'cursor'} <= set(search_tool.inputSchema['properties'])
             status = payload(await session.call_tool('index_status', {}))
@@ -102,13 +104,19 @@ async def offline_mcp(config_path, mail_id, job_id):
             assert threaded['count'] > 0 and threaded['query_cache_hit']
             assert threaded['items'][0]['thread_context']['source'] == 'original_cached_mail'
             for tool, arguments in (
-                ('list_sync_failures', {}), ('get_sync_progress', {}),
                 ('get_mail_thread', {'mail_id': mail_id}),
-                ('sync_job_status', {'job_id': job_id}),
+                ('sync_index', {'action': 'status', 'job_id': job_id}),
             ):
                 payload(await session.call_tool(tool, arguments))
-            cancelled = payload(await session.call_tool('cancel_sync_job', {'job_id': job_id}))
+            cancelled = payload(await session.call_tool('sync_index', {'action': 'cancel', 'job_id': job_id}))
             assert cancelled['cancel_requested']
+            if profile == 'full':
+                for tool, arguments in (
+                    ('list_sync_failures', {}), ('get_sync_progress', {}),
+                    ('sync_job_status', {'job_id': job_id}),
+                    ('cancel_sync_job', {'job_id': job_id}),
+                ):
+                    payload(await session.call_tool(tool, arguments))
     return 'passed'
 
 
@@ -172,6 +180,10 @@ def main():
                 # Explicitly remove configured dimensions to exercise restart recovery.
                 with patch.dict(os.environ, {'OUTLOOK_RAG_DIMENSIONS': 'auto'}):
                     report['offline_mcp_restart_and_controls'] = asyncio.run(offline_mcp(config_path, mails[0]['id'], job_id))
+                    settings = json.loads(config_path.read_text(encoding='utf-8'))
+                    config_path.write_text(json.dumps(dict(settings, mcp_tool_profile='full')), encoding='utf-8')
+                    report['full_profile_offline_compatibility'] = asyncio.run(offline_mcp(config_path, mails[0]['id'], job_id))
+                    config_path.write_text(json.dumps(settings), encoding='utf-8')
                     assert proxy.requests == before
                 assert app.search(queries[0])['query_cache_hit']
                 try:
