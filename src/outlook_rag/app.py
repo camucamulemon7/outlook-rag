@@ -20,11 +20,11 @@ from typing import Any, Callable, Iterator
 
 import httpx
 import lancedb
-import pyarrow as pa
+from lancedb.index import IvfHnswFlat
 from filelock import FileLock
 from mcp.server.fastmcp import FastMCP
 
-from . import cli, jobs, search as search_engine, server
+from . import cli, jobs, search as search_engine, server, storage
 from .features import local_config, stored_sql, folder_progress, failure_reason
 from .outlook import (
     safe_attr as safe_attr,
@@ -109,8 +109,9 @@ def config(*, resolve_dimensions: bool = True) -> dict:
                   "chunk_size": int, "chunk_overlap": int, "warmup_on_start": json.loads,
                   "sync_max_seconds": float, "sync_max_scanned": int, "sync_retry_limit": int,
                   "embedding_request_dimensions": int, "query_cache_size": int,
-                  "search_candidates": int, "rrf_k": int, "semantic_weight": float, "lexical_weight": float}
-    fields = ("embedding_url", "model", "data_dir", "key_file", "api_key_env", "query_instruction", "query_prefix", "document_prefix", "model_revision", *converters)
+                  "search_candidates": int, "rrf_k": int, "semantic_weight": float, "lexical_weight": float,
+                  "search_nprobes": int, "search_ef": int, "search_exact": json.loads}
+    fields = ("embedding_url", "model", "data_dir", "key_file", "api_key_env", "query_instruction", "query_prefix", "document_prefix", "model_revision", "search_mode", *converters)
     for field in fields:
         value = os.environ.get("OUTLOOK_RAG_" + field.upper())
         if value is not None:
@@ -140,6 +141,15 @@ def config(*, resolve_dimensions: bool = True) -> dict:
     cfg.setdefault("rrf_k", 60)
     cfg.setdefault("semantic_weight", 1.0)
     cfg.setdefault("lexical_weight", 1.0)
+    cfg.setdefault("search_mode", "hybrid")
+    cfg.setdefault("search_exact", False)
+    if cfg["search_mode"] not in {"semantic", "hybrid", "lexical", "auto", "identifier"}:
+        raise ValueError("Invalid search_mode")
+    if type(cfg["search_exact"]) is not bool:
+        raise ValueError("search_exact must be a boolean")
+    for name in ("search_nprobes", "search_ef"):
+        if cfg.get(name) is not None and (type(cfg[name]) is not int or not 1 <= cfg[name] <= 65536):
+            raise ValueError(f"{name} must be 1..65536")
     if not 10 <= cfg["search_candidates"] <= 5000 or not 1 <= cfg["rrf_k"] <= 1000:
         raise ValueError("Invalid search candidate count or RRF constant")
     if not all(math.isfinite(cfg[name]) and 0 <= cfg[name] <= 10 for name in ("semantic_weight", "lexical_weight")) or not cfg["semantic_weight"] + cfg["lexical_weight"]:
@@ -341,7 +351,10 @@ def reader_lock(cfg: dict) -> FileLock:
     return FileLock(Path(cfg["data_dir"]) / "reader.lock", timeout=30)
 
 def pin_vectors(sql: sqlite3.Connection, table: Any) -> int:
-    version = int(sql.execute("SELECT value FROM state WHERE key='vector_version'").fetchone()[0])
+    row = sql.execute("SELECT value FROM state WHERE key='vector_version'").fetchone()
+    if not row:
+        raise ValueError("Index publication marker missing. Run rebuild-vectors with the matching settings.")
+    version = int(row[0])
     table.checkout(version)
     return version
 
@@ -351,12 +364,15 @@ def publish_vectors(sql: sqlite3.Connection, table: Any) -> None:
 
 
 @contextmanager
-def indexed_snapshot(sql: sqlite3.Connection, table: Any, cfg: dict) -> Iterator[None]:
+def indexed_snapshot(sql: sqlite3.Connection, table: Any, cfg: dict) -> Iterator[Any]:
     with reader_lock(cfg):
         sql.execute("BEGIN")
         try:
+            # A rebuild may have published a new table while embedding was in flight.
+            if table.name != storage.table_name(sql):
+                table = storage.current_table(sql, cfg)
             pin_vectors(sql, table)
-            yield
+            yield table
         finally:
             sql.rollback()
 
@@ -391,6 +407,8 @@ def open_store(cfg: dict) -> tuple[sqlite3.Connection, Any]:
     CREATE INDEX IF NOT EXISTS emails_folder ON emails(folder);
     CREATE TABLE IF NOT EXISTS chunks (id TEXT PRIMARY KEY, email_id TEXT NOT NULL, position INTEGER, text TEXT);
     CREATE INDEX IF NOT EXISTS chunks_email_position ON chunks(email_id, position);
+    CREATE TABLE IF NOT EXISTS identifiers(identifier TEXT,chunk_id TEXT,PRIMARY KEY(identifier,chunk_id));
+    CREATE INDEX IF NOT EXISTS identifiers_chunk ON identifiers(chunk_id);
     CREATE INDEX IF NOT EXISTS emails_received_date ON emails(substr(received,1,10));
     CREATE VIRTUAL TABLE IF NOT EXISTS lexical USING fts5(chunk_id UNINDEXED, terms);
     CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);
@@ -418,13 +436,14 @@ def open_store(cfg: dict) -> tuple[sqlite3.Connection, Any]:
     sql.commit()
     vectors = lancedb.connect(str(root / "vectors"))
     try:
-        table = vectors.open_table("mail_chunks")
+        table = vectors.open_table(storage.table_name(sql))
     except (FileNotFoundError, ValueError) as exc:
         if isinstance(exc, ValueError) and "was not found" not in str(exc):
             raise
-        schema = pa.schema([pa.field("id", pa.string()), pa.field("email_id", pa.string()),
-                            pa.field("vector", pa.list_(pa.float32(), vector_dimensions(cfg)))])
-        table = vectors.create_table("mail_chunks", schema=schema)
+        table = vectors.create_table(storage.table_name(sql), schema=storage.schema(vector_dimensions(cfg)))
+        if not sql.execute("SELECT 1 FROM chunks LIMIT 1").fetchone():
+            with sql:
+                sql.executemany("INSERT OR REPLACE INTO state VALUES (?,?)", [("vector_metadata", "1"), ("identifiers_ready", "1")])
     with reader_lock(cfg):
         # Adopt existing indexes without changing their chunk IDs. A concurrent
         # initializer may win; always reread the marker before checking out.
@@ -454,6 +473,7 @@ def upsert_mails(mails: list[dict], sql: sqlite3.Connection, table: Any, cfg: di
     pin_vectors(sql, table)
     stage = time.perf_counter()
     changed, records = [], []
+    metadata_changes = []
     unique: dict[str, str] = {}
     for mail in mails:
         if not re.fullmatch(r"[0-9a-f]{64}", mail["id"]):
@@ -466,6 +486,9 @@ def upsert_mails(mails: list[dict], sql: sqlite3.Connection, table: Any, cfg: di
                        .select(["id"]).limit(len(old_chunks) + 1).to_list()}
             if present == {row["id"] for row in old_chunks}:
                 stats["unchanged_content"] += 1
+                old = sql.execute("SELECT store_id,folder,sender,received FROM emails WHERE id=?", (mail["id"],)).fetchone()
+                if old and storage.metadata(old) != storage.metadata(mail):
+                    metadata_changes.append(mail)
                 continue
         changed.append(mail["id"])
         for position, text in enumerate(parts):
@@ -614,18 +637,26 @@ def upsert_mails(mails: list[dict], sql: sqlite3.Connection, table: Any, cfg: di
             client.close()
     with vector_publication(sql, table):
         stage = time.perf_counter()
+        native_metadata = storage.metadata_ready(sql, table)
+        if native_metadata:
+            for mail in metadata_changes:
+                table.update(where=f"email_id = '{mail['id']}'", values=storage.metadata(mail))
         if changed:
             table.delete("email_id IN (" + ",".join(f"'{mid}'" for mid in changed) + ")")
-            table.add([{"id": cid, "email_id": mid, "vector": cached[digest][0]} for cid, mid, _, _, digest in records])
+            mail_by_id = {mail["id"]: mail for mail in mails}
+            table.add([{"id": cid, "email_id": mid, "vector": cached[digest][0],
+                        **(storage.metadata(mail_by_id[mid]) if native_metadata else {})} for cid, mid, _, _, digest in records])
         stats["vector_write_ms"] = round((time.perf_counter() - stage) * 1000)
         stage = time.perf_counter()
         with sql:
             for mail_id in changed:
                 old = sql.execute("SELECT id FROM chunks WHERE email_id=?", (mail_id,)).fetchall()
                 sql.executemany("DELETE FROM lexical WHERE chunk_id=?", [(row[0],) for row in old])
+                sql.executemany("DELETE FROM identifiers WHERE chunk_id=?", [(row[0],) for row in old])
                 sql.execute("DELETE FROM chunks WHERE email_id=?", (mail_id,))
             sql.executemany("INSERT INTO chunks VALUES (?, ?, ?, ?)", [row[:4] for row in records])
             sql.executemany("INSERT INTO lexical VALUES (?, ?)", [(cid, cached[digest][1]) for cid, _, _, _, digest in records])
+            sql.executemany("INSERT OR IGNORE INTO identifiers VALUES (?,?)", [(identifier, cid) for cid, _, _, text, _ in records for identifier in storage.identifiers(text)])
             columns = ("id", "entry_id", "store_id", "folder", "subject", "sender", "recipients", "received", "modified", "body", "conversation_id")
             sql.executemany("INSERT OR REPLACE INTO emails VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                             [tuple(mail.get(column, "") for column in columns) + (datetime.now(timezone.utc).isoformat(),) for mail in mails])
@@ -775,8 +806,8 @@ def sync(folders: list[str] | None = None, max_emails: int | None = None, since_
                 if old_name and old_name != folder_name:
                     # Stable folder IDs survive path/store display-name changes.
                     # Update rows already scanned before resuming their cursor.
+                    storage.update_folder(sql, table, folder_name, store_id=store_id, old_folder=old_name)
                     with sql:
-                        sql.execute("UPDATE emails SET folder=? WHERE store_id=? AND folder=?", (folder_name, store_id, old_name))
                         sql.execute("UPDATE sync_failures SET folder=? WHERE store_id=? AND folder=?", (folder_name, store_id, old_name))
                 continuing = not checkpoint.get("complete", True) and "scan_mode" in checkpoint
                 mode = checkpoint.get("scan_mode") if continuing else ("reconcile" if reconcile else "incremental" if checkpoint.get("complete") else "backfill")
@@ -945,7 +976,7 @@ def sync(folders: list[str] | None = None, max_emails: int | None = None, since_
                         if (previous and same_modified(previous["modified"], metadata["modified"])) or (failure and same_modified(failure["modified"], metadata["modified"])):
                             flush()
                             if previous:
-                                sql.execute("UPDATE emails SET folder=? WHERE id=? AND folder<>?", (folder_name, mail_id, folder_name))
+                                storage.update_folder(sql, table, folder_name, mail_id=mail_id)
                             skipped += 1
                             advance(metadata)
                             continue
@@ -1022,6 +1053,7 @@ def remove_mail(mail_id: str, sql: sqlite3.Connection, table: Any) -> None:
         with sql:
             ids = sql.execute("SELECT id FROM chunks WHERE email_id=?", (mail_id,)).fetchall()
             sql.executemany("DELETE FROM lexical WHERE chunk_id=?", [(row[0],) for row in ids])
+            sql.executemany("DELETE FROM identifiers WHERE chunk_id=?", [(row[0],) for row in ids])
             sql.execute("DELETE FROM chunks WHERE email_id=?", (mail_id,))
             sql.execute("DELETE FROM emails WHERE id=?", (mail_id,))
             sql.execute("DELETE FROM embedding_pending WHERE email_id=?", (mail_id,))
@@ -1034,30 +1066,42 @@ def cached_query_vector(query: str, sql: sqlite3.Connection, cfg: dict) -> tuple
     if row:
         values = array("f")
         values.frombytes(row[0])
-        with sql:
-            sql.execute("UPDATE query_cache SET last_used=? WHERE hash=?", (time.time(), key))
+        cache_query(sql, "UPDATE query_cache SET last_used=? WHERE hash=?", (time.time(), key))
         return list(values), True
     vector = embed([query], cfg, query=True)[0]
     if size:
-        with sql:
-            sql.execute("INSERT OR REPLACE INTO query_cache VALUES (?,?,?)", (key, array("f", vector).tobytes(), time.time()))
-            sql.execute("DELETE FROM query_cache WHERE hash NOT IN (SELECT hash FROM query_cache ORDER BY last_used DESC LIMIT ?)", (size,))
+        cache_query(sql, "INSERT OR REPLACE INTO query_cache VALUES (?,?,?)", (key, array("f", vector).tobytes(), time.time()), size)
     return vector, False
+
+def cache_query(sql: sqlite3.Connection, statement: str, values: tuple, size: int | None = None) -> None:
+    """Cache writes are optional; never wait for the sync writer on a search."""
+    timeout = sql.execute("PRAGMA busy_timeout").fetchone()[0]
+    sql.execute("PRAGMA busy_timeout=0")
+    try:
+        with sql:
+            sql.execute(statement, values)
+            if size is not None:
+                sql.execute("DELETE FROM query_cache WHERE hash NOT IN (SELECT hash FROM query_cache ORDER BY last_used DESC LIMIT ?)", (size,))
+    except sqlite3.OperationalError as exc:
+        if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+            raise
+    finally:
+        sql.execute(f"PRAGMA busy_timeout={timeout}")
 
 def search(query: str, limit: int = 10, folder: str | None = None, sender: str | None = None,
            since: str | None = None, until: str | None = None, hybrid: bool = True, group_by_thread: bool = False,
-           min_similarity: float | None = None) -> dict:
+           min_similarity: float | None = None, mode: str | None = None) -> dict:
     return search_engine.search(sys.modules[__name__], query, limit, folder, sender, since, until,
-                                hybrid, group_by_thread, min_similarity)
+                                hybrid, group_by_thread, min_similarity, mode)
 
 def status() -> dict:
     cfg = local_config()
     if not cfg.get('dimensions'):
         raise ValueError('Index not initialized. Run sync_emails with the embedding API available first.')
     with _LOCK:
-        sql, table = open_store(cfg)
+        sql, table = storage.open_index(cfg, writable=False)
         try:
-            with indexed_snapshot(sql, table, cfg):
+            with indexed_snapshot(sql, table, cfg) as table:
                 return {"folder_progress": folder_progress(sql, cfg), "model": cfg["model"], "dimensions": cfg["dimensions"],
                     "storage_dimensions": vector_dimensions(cfg),
                     "text_cleaning_version": cfg["text_cleaning_version"],
@@ -1071,6 +1115,7 @@ def status() -> dict:
                     "api_dimension_reduction": _API_DIMENSIONS.get((cfg["embedding_url"], cfg["model"], cfg.get("embedding_request_dimensions", 0)), "unverified"),
                     "embedding_batch_size": cfg["embedding_batch_size"], "embedding_concurrent_requests": cfg["embedding_concurrent_requests"], "sync_batch_emails": cfg["sync_batch_emails"], "sync_prefetch_emails": cfg.get("sync_prefetch_emails", 16),
                     "vector_rows": table.count_rows(), "vector_indexes": [str(index) for index in table.list_indices()],
+                    "vector_coverage": storage.vector_status(table), "vector_metadata_filters": storage.metadata_ready(sql, table),
                     "folders": [dict(row) for row in sql.execute("SELECT folder, count(*) AS emails, max(indexed_at) AS last_indexed FROM emails GROUP BY folder")],
                     "sync_windows": [window for row in sql.execute("SELECT value FROM state WHERE key LIKE 'sync:%'")
                                      if (window := json.loads(row[0])) and (cfg.get("folders") == "auto" or window.get("folder") in cfg["folders"])],
@@ -1095,15 +1140,15 @@ def get_mail(mail_id: str, max_body_chars: int = 10000) -> dict:
         return result
 
 def optimize() -> dict:
-    cfg = config()
+    cfg = local_config()
     with mutation_lock(cfg):
-        sql, table = open_store(cfg)
+        sql, table = storage.open_index(cfg)
         try:
             count = table.count_rows()
             if count < 256:
                 return {"indexed": False, "rows": count, "note": "Small index uses exact vector search; ANN enabled from 256 chunks."}
             with vector_publication(sql, table):
-                table.create_index(metric="cosine", index_type="IVF_HNSW_FLAT", num_partitions=max(1, min(64, count // 256)))
+                table.create_index("vector", config=IvfHnswFlat(distance_type="cosine", num_partitions=max(1, min(64, count // 256))))
                 with sql:
                     publish_vectors(sql, table)
             return {"indexed": True, "rows": count, "indexes": [str(index) for index in table.list_indices()]}
@@ -1112,9 +1157,9 @@ def optimize() -> dict:
 
 def maintain() -> dict:
     """Reclaim unreferenced caches and compact Lance versions, retaining seven days."""
-    cfg = config()
+    cfg = local_config()
     with mutation_lock(cfg):
-        sql, table = open_store(cfg)
+        sql, table = storage.open_index(cfg)
         try:
             sql.execute("CREATE TEMP TABLE active_hashes(hash TEXT PRIMARY KEY)")
             cursor = sql.execute("SELECT text FROM chunks")
@@ -1144,6 +1189,11 @@ def maintain() -> dict:
                     result = table.optimize(cleanup_older_than=timedelta(days=7), delete_unverified=False)
                     with sql:
                         publish_vectors(sql, table)
+                vectors = lancedb.connect(str(Path(cfg["data_dir"]) / "vectors"))
+                current = storage.table_name(sql)
+                for name in vectors.list_tables().tables:
+                    if name != current and re.fullmatch(r"mail_chunks(?:_[0-9a-f]{32})?", name):
+                        vectors.drop_table(name)
             removed_logs = jobs.prune_logs(cfg)
             return {"removed_worker_logs": removed_logs, "removed_cached_embeddings": removed, "removed_entry_aliases": removed_aliases, "vector_maintenance": str(result), "retention_days": 7}
         finally:

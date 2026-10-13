@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from . import features, jobs
+from . import features, jobs, storage
 
 
 def main(backend: Any) -> None:
@@ -39,6 +39,9 @@ def main(backend: Any) -> None:
         search_parser.add_argument("--" + name)
     search_parser.add_argument("--min-similarity", type=float)
     search_parser.add_argument("--semantic-only", action="store_true")
+    search_parser.add_argument(
+        "--mode", choices=("semantic", "hybrid", "lexical", "auto", "identifier")
+    )
     search_parser.add_argument("--group-by-thread", action="store_true")
     job = sub.add_parser("job", help="Start, inspect or cancel a detached bulk sync.")
     job_sub = job.add_subparsers(dest="action", required=True)
@@ -68,13 +71,40 @@ def main(backend: Any) -> None:
     thread.add_argument("--max-body-chars", type=int, default=2000)
     sub.add_parser("optimize")
     sub.add_parser("maintain")
+    sub.add_parser("doctor", help="Check the saved index without the embedding API.")
+    sub.add_parser(
+        "rebuild-vectors",
+        help="Rebuild search indexes using cached embeddings; no API calls.",
+    )
+    backup = sub.add_parser(
+        "backup-index",
+        help="Back up the paired SQLite and vector index to a new directory.",
+    )
+    backup.add_argument("destination")
+    restore = sub.add_parser(
+        "restore-index", help="Restore a backup to a new directory and verify it."
+    )
+    restore.add_argument("source")
+    restore.add_argument("destination")
     worker_parser = sub.add_parser("_job-worker", help=argparse.SUPPRESS)
     worker_parser.add_argument("job_id")
     args = parser.parse_args()
     if args.config:
         os.environ["OUTLOOK_RAG_CONFIG"] = args.config
     offline = (
-        args.command in ("status", "progress", "thread")
+        args.command
+        in (
+            "status",
+            "progress",
+            "thread",
+            "doctor",
+            "rebuild-vectors",
+            "backup-index",
+            "restore-index",
+            "optimize",
+            "maintain",
+            "search",
+        )
         or (args.command == "job" and args.action != "start")
         or (args.command == "failures" and args.action == "list")
     )
@@ -128,6 +158,9 @@ def main(backend: Any) -> None:
             args.max_scanned,
         )
     elif args.command == "search":
+        options = {"mode": args.mode} if args.mode is not None else {}
+        if args.semantic_only and args.mode is not None:
+            parser.error("Choose --mode or --semantic-only")
         result = backend.search(
             args.query,
             args.limit,
@@ -138,6 +171,7 @@ def main(backend: Any) -> None:
             not args.semantic_only,
             args.group_by_thread,
             args.min_similarity,
+            **options,
         )
     elif args.command == "job":
         if args.action == "start":
@@ -163,6 +197,14 @@ def main(backend: Any) -> None:
         result = backend.optimize()
     elif args.command == "maintain":
         result = backend.maintain()
+    elif args.command == "doctor":
+        result = storage.doctor(cfg)
+    elif args.command == "rebuild-vectors":
+        result = storage.rebuild_vectors(cfg)
+    elif args.command == "backup-index":
+        result = storage.backup_index(cfg, args.destination)
+    elif args.command == "restore-index":
+        result = storage.restore_index(cfg, args.source, args.destination)
     else:
         if cfg.get("warmup_on_start", True):
             backend.threading.Thread(

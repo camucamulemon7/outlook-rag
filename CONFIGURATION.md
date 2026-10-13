@@ -40,6 +40,10 @@ Set `OUTLOOK_RAG_EMBEDDING_URL` if your endpoint differs from the default. As an
 | OUTLOOK_RAG_RRF_K | 60 |
 | OUTLOOK_RAG_SEMANTIC_WEIGHT | 1.0 |
 | OUTLOOK_RAG_LEXICAL_WEIGHT | 1.0 |
+| OUTLOOK_RAG_SEARCH_MODE | hybrid; semantic, lexical, identifier and opt-in auto are also supported |
+| OUTLOOK_RAG_SEARCH_NPROBES | Unset: SDK default. 1..65536 partitions probed by ANN |
+| OUTLOOK_RAG_SEARCH_EF | Unset: SDK default. 1..65536 HNSW effort; raised to at least the current candidate count |
+| OUTLOOK_RAG_SEARCH_EXACT | false; true bypasses ANN for an exact cosine baseline |
 | OUTLOOK_RAG_CHUNK_SIZE | 1600 characters |
 | OUTLOOK_RAG_CHUNK_OVERLAP | 200 characters |
 | OUTLOOK_RAG_TEXT_CLEANING_VERSION | 2: enhanced text cleanup |
@@ -72,7 +76,7 @@ Job diagnostics are stored in `<data_dir>/jobs/<job_id>.log` and exposed as `log
 
 Server-side dimension requests do not change index identity: full output is still detected as the model's native dimension, and stored dimensions remain fixed. Unsupported dimension requests fall back once per process. Only request reduced dimensions from models that support MRL.
 
-Candidate count and RRF weights affect ranking only and do not require re-indexing. Use a labeled query set to compare changes before selecting new defaults.
+Candidate count, search mode, ANN search parameters and RRF weights do not change embedding identity or require re-indexing. Hybrid weights apply only in hybrid mode; semantic and lexical modes enable their single source with weight 1. Use a labeled query set to compare changes before selecting new defaults. `mode` in an individual search overrides `SEARCH_MODE`, and `hybrid=false` selects semantic mode when `mode` is omitted.
 
 When chunk candidates collapse into too few distinct emails or threads, search doubles the pool up to 5,000 candidates per source. A five-second cooperative expansion budget is checked between rounds; a single database operation may overrun it. Results include `candidate_limit`, `candidate_cap`, `candidate_limit_reached` and `candidate_time_limit_reached`.
 
@@ -92,6 +96,10 @@ Changing the model, vector dimensions, chunking, or other index identity setting
 
 SQLite now records the LanceDB version published with each mail/chunk transaction. Searches read matching snapshots; a failed or interrupted vector write leaves the previous version searchable and is restored before another write. Existing indexes are adopted without changing IDs or re-indexing. Stop MCP and bulk workers before upgrading, and do not run older server versions against an index using this publication marker. Maintenance protects the published rollback version while compacting storage.
 
+SQLite is the canonical local database; LanceDB is a rebuildable vector index. No persistent DB service is needed. `doctor`, `backup-index`, `restore-index`, `rebuild-vectors`, `optimize` and `maintain` use saved dimensions and require no API credentials. Back up both stores together with `backup-index <new-directory>`; copying only a live SQLite file misses its WAL and the matching vector generation. Restore with `restore-index <backup> <new-directory>` and update `data_dir` afterward. The destinations must not exist; backup cannot be inside `data_dir`. These commands exclude credentials and worker jobs.
+
+`rebuild-vectors` validates every cached chunk vector, builds a separate vector table with metadata and indexes, repairs lexical/identifier indexes, then publishes the table name/version in one SQLite transaction. It also upgrades legacy tables without re-embedding. Failure keeps the old publication. Missing or invalid cached vectors require re-syncing the affected content; doctor reports whether an offline rebuild is possible. Old generations consume disk until `maintain_index` removes them under the reader lock. Stop older application versions before using the new generation marker.
+
 Offline automatic index discovery logs unreadable SQLite/JSON/snapshot candidates and continues to a valid matching index. An explicitly selected damaged directory, or no usable match with damaged candidates present, produces a recovery error. Model/settings matching and ambiguous-dimension checks still apply.
 
 The CLI also accepts `--config <path>`; MCP environment variables override values in that file. Relative database and key-file paths in a config file are resolved against its directory.
@@ -100,10 +108,12 @@ To store an encrypted API key interactively, run `outlook-rag set-key` with the 
 
 During embedding requests, sync reads ahead on the Outlook/SQLite owner thread. HTTP requests run in the existing worker pool. At most `SYNC_PREFETCH_EMAILS` extra rows are buffered; already-indexed mail is checked before reading its body. Prefetched rows do not advance checkpoints until processed and saved. Cancellation, time limits and provider failures leave unpublished rows for the next sync. API batch size/concurrency and indexed content are unchanged. Folder `batch_stats` reports `prefetched_rows`, `prefetch_peak_rows` and `prefetch_read_ms`; these timings overlap embedding time and should not be added to it.
 
-Search filters are evaluated against the SQL snapshot. LanceDB receives at most 1,000 eligible email IDs per query expression, then shard top candidates are merged by cosine distance. This preserves filtered retrieval even when excluded emails dominate the global ranking. Large filters may require multiple queries; the search expansion budget is cooperative between complete rounds.
+Search filters are evaluated against matching SQL/vector snapshots. New and rebuilt indexes use native folder, ASCII-case-insensitive sender substring, and inclusive received-date prefilters, without collecting every eligible mail ID. Candidate metadata is rechecked in SQLite. Legacy tables use at most 1,000 eligible email IDs per expression, merging shard top candidates by cosine distance; run `rebuild-vectors` to upgrade. Search batches candidate metadata and thread counts without loading full mail bodies or writing schema state. Query-cache writes are best effort when a sync transaction owns SQLite; a cached query can still be searched during that write.
 
 `search_emails` and CLI `search --min-similarity` accept an optional cosine lower bound from -1 to 1. The default is unset. BM25 candidates also receive a measured cosine similarity when filtering is enabled. Calibrate thresholds with your model; scores are not probabilities. Snippets prefer query context within the matched chunk and remain plain text. Filtering occurs before grouping and can legitimately return zero results.
 
 CLI `job start/status/cancel`, `failures list/retry`, `progress` and `thread` reuse MCP operations and return JSON. Cached reads and cancellation recover dimensions locally and need no API key. Job start/retry use the configured provider credentials. `--config` precedes the subcommand; `--help` is available for each command group.
+
+CLI `search --mode lexical` and `search --mode identifier` need no provider unless `--min-similarity` requests a cosine check. Identifier search accepts exactly one complete ASCII letter/digit ID with `-` or `_`, such as `HT-5639`, and orders exact matches by received date. Unknown IDs return zero results. `auto` chooses this path for one unambiguous positive ID and otherwise semantic search; multiple IDs and common negation phrases are left to semantic retrieval. Auto is opt-in and is a heuristic, not a Boolean parser. Without a calibrated threshold, natural-language searches can return irrelevant relative neighbors.
 
 A search source with weight `0` is disabled and cannot add zero-score candidates. With only BM25 enabled and no similarity threshold, search does not request a query embedding. A requested threshold still needs a query vector, which can come from the cache. An empty metadata-filter result returns before query embedding; nonempty conditions are checked again in the matching SQL/vector snapshot. Snippet offsets are measured in the original Unicode text. WMI startup failures retain their numeric process-creation return code in sanitized diagnostics.
