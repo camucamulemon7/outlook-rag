@@ -8,26 +8,35 @@ from typing import Any
 from urllib.parse import urlsplit
 
 _LOCK = threading.RLock()
-_TOKENIZER: Any = None
+_DICTIONARY: Any = None
+_LOCAL = threading.local()
+
+
+def _get_tokenizer() -> tuple[Any, Any]:
+    global _DICTIONARY
+    if _DICTIONARY is None:
+        with _LOCK:
+            if _DICTIONARY is None:
+                from sudachipy import dictionary
+
+                _DICTIONARY = dictionary.Dictionary()
+    tokenizer_obj = getattr(_LOCAL, "tokenizer", None)
+    if tokenizer_obj is None:
+        from sudachipy import tokenizer
+
+        tokenizer_obj = (_DICTIONARY.tokenizer(), tokenizer.Tokenizer.SplitMode.A)
+        _LOCAL.tokenizer = tokenizer_obj
+    return tokenizer_obj
 
 
 def tokens(text: str) -> str:
-    global _TOKENIZER
-    with _LOCK:
-        if _TOKENIZER is None:
-            from sudachipy import dictionary, tokenizer
-
-            _TOKENIZER = (
-                dictionary.Dictionary().tokenizer(),
-                tokenizer.Tokenizer.SplitMode.A,
-            )
-        engine, mode = _TOKENIZER
-        words = [
-            word.normalized_form().lower()
-            for word in engine.tokenize(text, mode)
-            if not word.part_of_speech()[0] in ("補助記号", "空白", "助詞", "助動詞")
-        ]
-        return " ".join(words)
+    engine, mode = _get_tokenizer()
+    words = [
+        word.normalized_form().lower()
+        for word in engine.tokenize(text, mode)
+        if not word.part_of_speech()[0] in ("補助記号", "空白", "助詞", "助動詞")
+    ]
+    return " ".join(words)
 
 
 def safe_text(value: str) -> str:

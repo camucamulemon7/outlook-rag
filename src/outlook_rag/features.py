@@ -205,7 +205,8 @@ def retry(cfg: dict, mail_ids: list[str], max_seconds: float=30) -> dict:
                 missing = [mid for mid in requested if mid not in rows]
                 selected = [mid for mid in requested if mid in rows]
                 namespace = win32com.client.Dispatch('Outlook.Application').GetNamespace('MAPI') if selected else None
-                with httpx.Client(timeout=httpx.Timeout(120,connect=10),trust_env=False) as client:
+                limits = httpx.Limits(max_connections=32, max_keepalive_connections=16, keepalive_expiry=60.0)
+                with httpx.Client(timeout=httpx.Timeout(120, connect=10), limits=limits, trust_env=False) as client:
                     for position, mid in enumerate(selected):
                         if time.perf_counter() >= deadline:
                             pending = selected[position:]
