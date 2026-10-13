@@ -131,10 +131,11 @@ def cache_query(sql: sqlite3.Connection, statement: str, values: tuple, size: in
 def search(query: str, limit: int = 10, folder: str | None = None, sender: str | None = None,
            since: str | None = None, until: str | None = None, hybrid: bool = True, group_by_thread: bool = False,
            min_similarity: float | None = None, mode: str | None = None, *,
-           subject: str | None = None, recipient: str | None = None, cursor: str | None = None) -> dict:
+           subject: str | None = None, recipient: str | None = None, cursor: str | None = None,
+           has_attachments: bool | None = None, deduplicate: bool = True) -> dict:
     return search_engine.search(sys.modules[__name__], query, limit, folder, sender, since, until,
                                 hybrid, group_by_thread, min_similarity, mode,
-                                subject=subject, recipient=recipient, cursor=cursor)
+                                subject=subject, recipient=recipient, cursor=cursor, has_attachments=has_attachments, deduplicate=deduplicate)
 
 def status() -> dict:
     return features_engine.status(sys.modules[__name__])

@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from importlib.metadata import version
 from typing import Any
 
 from . import features, jobs, storage, threads, server
@@ -17,6 +18,7 @@ def main(backend: Any) -> None:
         description="Search and maintain the local Outlook index; no command starts MCP stdio."
     )
     parser.add_argument("--config")
+    parser.add_argument("--version", action="version", version=version("outlook-rag"))
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("status")
     sub.add_parser("sources")
@@ -45,6 +47,8 @@ def main(backend: Any) -> None:
     for name in ("subject", "recipient", "cursor"):
         search_parser.add_argument("--" + name)
     search_parser.add_argument("--group-by-thread", action="store_true")
+    search_parser.add_argument("--has-attachments", action=argparse.BooleanOptionalAction, default=None)
+    search_parser.add_argument("--no-deduplicate", action="store_true")
     job = sub.add_parser("job", help="Start, inspect or cancel a detached bulk sync.")
     job_sub = job.add_subparsers(dest="action", required=True)
     job_start = job_sub.add_parser("start", help="Start or reuse a bulk job.")
@@ -164,6 +168,10 @@ def main(backend: Any) -> None:
     elif args.command == "search":
         options = {"mode": args.mode} if args.mode is not None else {}
         options.update({name: getattr(args, name) for name in ("subject", "recipient", "cursor") if getattr(args, name) is not None})
+        if args.has_attachments is not None:
+            options["has_attachments"] = args.has_attachments
+        if args.no_deduplicate:
+            options["deduplicate"] = False
         if args.semantic_only and args.mode is not None:
             parser.error("Choose --mode or --semantic-only")
         result = backend.search(

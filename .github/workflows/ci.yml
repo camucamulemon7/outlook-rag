@@ -20,7 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, windows-2025]
-        python: ['3.11', '3.12', '3.13']
+        python: ['3.11', '3.12', '3.13', '3.14']
     env:
       PYTHONUTF8: '1'
       UV_PYTHON_DOWNLOADS: never
@@ -38,7 +38,20 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --frozen --python "${{ matrix.python }}"
       - name: Run offline unit tests
-        run: uv run --frozen --offline python -m unittest discover -s tests -p "test_*.py" -v
+        run: uv run --frozen --offline coverage run --source=outlook_rag -m unittest discover -s tests -p "test_*.py" -v
+      - name: Test opt-in scheduled upkeep
+        if: matrix.os == 'windows-2025' && matrix.python == '3.12'
+        shell: pwsh
+        run: ./tests/test_scheduled_sync.ps1
+      - name: Report coverage
+        if: always()
+        run: uv run --frozen --offline coverage xml
+      - name: Save coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-${{ matrix.os }}-${{ matrix.python }}
+          path: coverage.xml
 
   quality:
     name: Ruff and Mypy
@@ -61,5 +74,22 @@ jobs:
         run: uv sync --frozen --python "3.12"
       - name: Check Python correctness
         run: uv run --frozen --offline ruff check .
+      - name: Check lock consistency
+        run: uv lock --check
       - name: Check source types
         run: uv run --frozen --offline mypy src
+      - name: Check installation pins
+        run: uv run --frozen --offline python scripts/check_release.py
+      - name: Build wheel and source distribution
+        run: uv build
+      - name: Install wheel into clean environment
+        shell: bash
+        run: |
+          uv venv /tmp/outlook-rag-wheel
+          uv pip install --python /tmp/outlook-rag-wheel/bin/python dist/*.whl
+          /tmp/outlook-rag-wheel/bin/outlook-rag --help
+          /tmp/outlook-rag-wheel/bin/outlook-rag --version
+      - name: Audit runtime dependencies
+        run: |
+          uv export --frozen --all-extras --no-dev --no-emit-project --no-hashes --output-file /tmp/outlook-rag-requirements.txt
+          uv run --frozen pip-audit -r /tmp/outlook-rag-requirements.txt --disable-pip --no-deps

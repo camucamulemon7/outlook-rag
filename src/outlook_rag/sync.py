@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx
 
-from . import coverage, storage, paths
+from . import coverage, storage, paths, outlook, mail_metadata
 
 class ReadAhead:
     """Bounded caller-thread prefetch; COM and SQLite never cross threads."""
@@ -133,7 +133,7 @@ def sync(backend: Any, folders: list[str] | None = None, max_emails: int | None 
                 retried += 1
                 try:
                     item = namespace.GetItemFromID(failure["entry_id"], failure["store_id"])
-                    metadata.update(item=item, modified=backend.iso(item.LastModificationTime), received=backend.iso(item.ReceivedTime))
+                    metadata.update(item=item, modified=outlook.item_date(item, "LastModificationTime", outlook.MODIFIED), received=outlook.item_date(item, "ReceivedTime", outlook.RECEIVED), _attachment_cfg=cfg)
                     mail = backend.read_outlook_mail(namespace, metadata, failure["store_id"], failure["folder"])
                 except Exception as exc:
                     backend.record_sync_failure(sql, metadata, failure["store_id"], failure["folder"], exc)
@@ -183,13 +183,13 @@ def sync(backend: Any, folders: list[str] | None = None, max_emails: int | None 
                 cursor = checkpoint.get("cursor_received") if continuing or (mode == "backfill" and not reconcile) else None
                 cursor_ids = set(checkpoint.get("cursor_ids", [])) if cursor else set()
                 cutoff = datetime.now() - timedelta(days=since_days) if since_days else None
-                filters = [f"[ReceivedTime] >= '{cutoff.strftime('%m/%d/%Y %I:%M %p')}'"] if cutoff else []
+                filters = [f"[ReceivedTime] >= '{outlook.date_literal(cutoff)}'"] if cutoff else []
                 if mode == "incremental" and scan_from:
                     modified = datetime.fromisoformat(scan_from).astimezone() - timedelta(minutes=5)
-                    filters.append(f"[LastModificationTime] >= '{modified.strftime('%m/%d/%Y %I:%M %p')}'")
+                    filters.append(f"[LastModificationTime] >= '{outlook.date_literal(modified)}'")
                 if cursor:
-                    boundary = datetime.fromisoformat(cursor) + timedelta(minutes=1)
-                    filters.append(f"[ReceivedTime] <= '{boundary.strftime('%m/%d/%Y %I:%M %p')}'")
+                    boundary = datetime.fromisoformat(cursor).astimezone() + timedelta(minutes=1)
+                    filters.append(f"[ReceivedTime] <= '{outlook.date_literal(boundary)}'")
                 if mode == "reconcile" and not continuing:
                     with sql:
                         sql.execute("DELETE FROM sync_seen WHERE scan_key=?", (state_key,))
@@ -272,7 +272,7 @@ def sync(backend: Any, folders: list[str] | None = None, max_emails: int | None 
                         metadata = backend.canonical_metadata(namespace, metadata, store_id, sql, alias_session)
                     except Exception as exc:
                         return (dict(metadata, _canonical_error=exc), source)
-                    metadata = dict(metadata, _canonical=True)
+                    metadata = dict(metadata, _canonical=True, _attachment_cfg=cfg)
                     mail_id = hashlib.sha256(f"{store_id}:{metadata['entry_id']}".encode()).hexdigest()
                     previous = sql.execute("SELECT modified FROM emails WHERE id=?", (mail_id,)).fetchone()
                     failure = sql.execute("SELECT modified FROM sync_failures WHERE mail_id=?", (mail_id,)).fetchone()
@@ -339,6 +339,13 @@ def sync(backend: Any, folders: list[str] | None = None, max_emails: int | None 
                             flush()
                             if previous:
                                 storage.update_folder(sql, table, folder_name, mail_id=mail_id)
+                                storage.update_dates(sql, table, mail_id, metadata["received"], metadata["modified"], cfg)
+                                if not sql.execute("SELECT 1 FROM mail_metadata WHERE email_id=?", (mail_id,)).fetchone():
+                                    item = metadata.get("item")
+                                    if item is None:
+                                        item = namespace.GetItemFromID(metadata["entry_id"], store_id)
+                                    with sql:
+                                        mail_metadata.save(sql, dict(id=mail_id, **mail_metadata.read(item)))
                             skipped += 1
                             advance(metadata)
                             continue
@@ -349,6 +356,7 @@ def sync(backend: Any, folders: list[str] | None = None, max_emails: int | None 
                                 raise metadata["_read_error"]
                             prepared_mail = metadata.get("_prefetched_mail")
                             if prepared_mail is None:
+                                metadata["_attachment_cfg"] = cfg
                                 prepared_mail = backend.read_outlook_mail(namespace, metadata, store_id, folder_name)
                         except Exception as exc:
                             flush()
@@ -396,6 +404,12 @@ def sync(backend: Any, folders: list[str] | None = None, max_emails: int | None 
                         sql.execute("INSERT OR REPLACE INTO state VALUES (?,?)", (rotation_key, f"{next_folder.StoreID}:{next_folder.EntryID}"))
             if not pending_folders and targets and stop_reason:
                 pending_folders = [name for name, _ in targets[len(reports):]]
+            if selection == "auto" and since_days == 0 and not stop_reason and not discovery_errors and not folder_errors and not failed_total and len(reports) == len(targets) and all(r["window_complete"] for r in reports):
+                connected = {(str(folder.StoreID), name) for name, folder in targets}
+                cached = {(str(r[0]), r[1]) for r in sql.execute("SELECT DISTINCT store_id,folder FROM emails")}
+                if cached <= connected:
+                    with sql:
+                        sql.execute("INSERT OR REPLACE INTO state VALUES ('outlook_dates_need_rescan','0')")
         finally:
             if sql:
                 sql.close()

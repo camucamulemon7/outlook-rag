@@ -1,0 +1,36 @@
+name: Release validated main
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+permissions:
+  contents: write
+  issues: write
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+jobs:
+  release:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - name: Check documented release pins
+        run: python3 scripts/check_release.py
+      - name: Publish version once
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          tag="v$version"
+          if gh release view "$tag" >/dev/null 2>&1; then exit 0; fi
+          gh release create "$tag" --target "$RELEASE_SHA" --title "$tag" --notes-file CHANGELOG.md
+          if [ "$version" = "0.9.0" ]; then
+            gh issue close 15 --reason completed --comment "v0.9.0をmainのCI成功後に公開しました。導入ピン、package version、タグとReleaseが一致し、CIで整合性を検証しています。"
+          fi

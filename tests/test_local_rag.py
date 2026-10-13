@@ -587,7 +587,7 @@ class SearchConfiguration(unittest.TestCase):
                 ("SEARCH_MODE", "bad"),
                 ("SEARCH_NPROBES", "0"),
                 ("SEARCH_EF", "-1"),
-                ("SEARCH_EXACT", "1"),
+                ("SEARCH_EXACT", "invalid"),
             ):
                 with (
                     patch.dict(os.environ, {"OUTLOOK_RAG_" + key: value}),

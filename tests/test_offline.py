@@ -209,7 +209,7 @@ class ConfigTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=True), patch.object(Path, "home", return_value=home):
                 cfg = app.config()
                 preferred = Path(cfg["data_dir"])
-                self.assertEqual(preferred.parent, home / "Documents" / "Outlook\u30d5\u30a1\u30a4\u30eb" / "outlook-rag")
+                self.assertEqual(preferred.parent, local / "outlook-rag" / "indexes")
                 self.assertEqual(Path(cfg["key_file"]), local / "outlook-rag" / "api-key.dpapi")
                 legacy = local / "outlook-rag" / hashlib.sha256(app.index_identity(cfg).encode()).hexdigest()[:12]
                 legacy.mkdir(parents=True)

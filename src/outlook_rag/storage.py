@@ -162,6 +162,23 @@ def update_folder(
             app.publish_vectors(sql, table)
 
 
+def update_dates(sql: sqlite3.Connection, table: Any, mail_id: str, received: str, modified: str, cfg: dict) -> None:
+    """Publish source-read dates without fetching a body or re-embedding."""
+    from . import app, threads
+    previous = sql.execute("SELECT received,modified FROM emails WHERE id=?", (mail_id,)).fetchone()
+    if previous is None or tuple(previous) == (received, modified):
+        return
+    with app.vector_publication(sql, table):
+        if metadata_ready(sql, table):
+            from .search import literal
+            table.update(where="email_id=" + literal(mail_id), values={"received_date": received[:10]})
+        with sql:
+            affected = threads.previous(sql, [mail_id])
+            sql.execute("UPDATE emails SET received=?,modified=? WHERE id=?", (received, modified, mail_id))
+            threads.refresh(sql, affected, cfg)
+            app.publish_vectors(sql, table)
+
+
 def _cached_rows(sql: sqlite3.Connection, dimensions: int) -> Any:
     """Bounded batches; every published chunk must have a valid cached vector."""
     cursor = sql.execute("""SELECT c.id,c.email_id,c.text,e.store_id,e.folder,e.sender,e.received

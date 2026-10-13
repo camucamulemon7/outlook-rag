@@ -12,7 +12,7 @@ from typing import Any, Iterator
 import lancedb
 from filelock import FileLock
 
-from . import storage, threads
+from . import storage, threads, mail_metadata, attachments
 
 def mutation_lock(backend: Any, cfg: dict) -> FileLock:
     root = Path(cfg["data_dir"])
@@ -104,6 +104,17 @@ def open_store(backend: Any, cfg: dict) -> tuple[sqlite3.Connection, Any]:
         BEGIN DELETE FROM sync_failure_details WHERE mail_id=OLD.mail_id; END""")
     sql.execute("CREATE INDEX IF NOT EXISTS emails_conversation_order ON emails(store_id,conversation_id,received,id)")
     threads.initialize(sql)
+    mail_metadata.initialize(sql)
+    attachments.initialize(sql)
+    date_schema = sql.execute("SELECT value FROM state WHERE key='outlook_date_schema'").fetchone()
+    if date_schema is None:
+        # Legacy COM wall-clock values cannot be corrected safely from SQLite.
+        # Reset cursors once and reread source dates on the next bounded sync.
+        if sql.execute("SELECT 1 FROM emails LIMIT 1").fetchone():
+            sql.execute("DELETE FROM state WHERE key LIKE 'sync:%'")
+            sql.execute("DELETE FROM sync_seen")
+            sql.execute("INSERT OR REPLACE INTO state VALUES ('outlook_dates_need_rescan','1')")
+        sql.execute("INSERT INTO state VALUES ('outlook_date_schema','2')")
     # Refuse a model/configuration mismatch rather than mixing embedding spaces.
     identity = backend.index_identity(cfg)
     previous = sql.execute("SELECT value FROM state WHERE key='embedding_identity'").fetchone()

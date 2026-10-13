@@ -19,7 +19,7 @@ Semantic and keyword search for Outlook email through MCP. Index your mail local
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) on your PATH.
 - An embedding API and its model name and API key.
 
-Python 3.11-3.13 is supported. The example uses Python 3.12; uv can download it on the first run.
+Python 3.11-3.14 is supported. The example uses Python 3.12; uv can download it on the first run.
 
 ## Installation
 
@@ -33,7 +33,7 @@ Add the following to your OpenCode configuration. Replace the model and API key 
         "type": "local",
         "command": [
           "uvx", "--python", "3.12", "--from",
-          "git+https://github.com/camucamulemon7/outlook-rag.git@v0.8.0",
+          "git+https://github.com/camucamulemon7/outlook-rag.git@v0.9.0",
           "outlook-rag"
         ],
         "environment": {
@@ -50,7 +50,7 @@ uvx installs the server and its dependencies on first connection. No clone or se
 
 The default embedding endpoint is `http://localhost:8080/api/v1/embeddings`. Add `OUTLOOK_RAG_EMBEDDING_URL` to `environment` for another endpoint.
 
-For offline startup, replace `@v0.8.0` with the full commit SHA shown on GitHub, run that command online once, then add `--offline` after `uvx`. Keep the Python version and uv caches available. Your embedding API must still be running.
+For offline startup, replace `@v0.9.0` with the full commit SHA shown on GitHub, run that command online once, then add `--offline` after `uvx`. Keep the Python version and uv caches available. Your embedding API must still be running. A version becomes available after the main-branch CI succeeds and the release workflow publishes its tag; use the PR commit SHA when testing unreleased changes.
 
 ## Usage
 
@@ -135,7 +135,7 @@ Qwen3-Embedding requests reduced dimensions from the API when possible, falling 
 
 New folders include a Windows-safe model name and stored dimensions; the trailing settings ID separates different embedding/chunk settings. Existing default folders in Documents or Local AppData remain in use until explicitly relocated. `OUTLOOK_RAG_DATA_DIR` always overrides the default. The database location does not determine where Outlook reads PST/OST files; connected stores are discovered through Outlook.
 
-For a new index, sync reads connected Outlook store paths once. If all PSTs share one directory, it creates the index under `<PST-directory>\outlook-rag\<model>-<dimensions>d-<settings-id>`. Multiple PSTs in that directory share one index across all stores. If PSTs are in different directories, set `OUTLOOK_RAG_DATA_ROOT` to one chosen index root, for example `D:\Mail\outlook-rag`, and retry. This selects storage only; all configured Outlook sources remain searchable. With no connected PST, the fallback is `%USERPROFILE%\Documents\Outlookファイル\outlook-rag`.
+For a new index, sync reads connected Outlook store paths once. If all PSTs share one directory, it creates the index under `<PST-directory>\outlook-rag\<model>-<dimensions>d-<settings-id>`. Multiple PSTs in that directory share one index across all stores. If PSTs are in different directories, set `OUTLOOK_RAG_DATA_ROOT` to one chosen index root, for example `D:\Mail\outlook-rag`, and retry. This selects storage only; all configured Outlook sources remain searchable. With no connected PST, new indexes use `%LOCALAPPDATA%\outlook-rag\indexes`. OneDrive paths produce a status notice and are never silently relocated.
 
 Automatic placement is remembered under `%LOCALAPPDATA%\outlook-rag\locations` (separately for environment-only setup and each config file). Cached search, status and cancellation do not inspect Outlook paths; disconnecting a PST does not switch the DB. Existing indexes or saved worker snapshots are reused before first choosing a location; after that, the saved root stays selected. A corrupt or inaccessible saved location raises an error instead of selecting another DB. API keys stay in Local AppData.
 
@@ -149,7 +149,7 @@ See [Configuration](CONFIGURATION.md) for optional settings and [opencode.exampl
 
 The server does not modify Outlook mail. Email text and vectors are stored locally; cleaned text and queries are sent to your configured embedding API.
 
-Only indexed mail is searchable. Attachments, New Outlook, and disconnected PST files are not supported. Deleted or moved mail is removed from the local index by `sync_index(action="start", reconcile=true)` after a complete scan.
+Only indexed mail is searchable. New Outlook and disconnected PST files are not supported. Attachment text indexing is opt-in and requires optional parsers; extracted text is also sent to the embedding API. Deleted or moved mail is removed from the local index by `sync_index(action="start", reconcile=true)` after a complete scan. See [optional operations](OPERATIONS.md) for attachment limits, scheduled synchronization, legacy date/metadata backfill and API retry behavior.
 
 ## Development
 
@@ -197,7 +197,7 @@ The offline unit tests also run on macOS and Linux using synthetic COM imports. 
 
 On Windows with Outlook Classic, run `uv run --frozen python tests/verify_outlook_metadata.py --folder inbox --max-rows 65` to compare GetArray metadata with GetNextRow on the same table. Choose a populated folder; other folder paths are accepted. This opt-in check reads only IDs/classes/timestamps and outputs counts, without email bodies, identifying values, API calls or index writes.
 
-GitHub Actions runs the complete offline unit suite on every push and pull request, on Ubuntu 24.04 and Windows Server 2025 with Python 3.11, 3.12 and 3.13. Dependencies come from `uv.lock` via `uv sync --frozen`; the test command then runs with uv offline. A separate quality job runs locked Ruff and Mypy. CI needs no API credentials, OpenWebUI service or user mail. Windows installs the real pywin32 package, but Outlook dispatch and background worker launch remain mocked; Linux substitutes COM imports. No tests are intentionally skipped for either OS. These checks do not validate a real Outlook profile, PST/GetTable provider behavior, WMI worker survival or screen interaction.
+GitHub Actions runs the complete offline unit suite on every push and pull request, on Ubuntu 24.04 and Windows Server 2025 with Python 3.11-3.14, including coverage reports. Dependencies come from `uv.lock` via `uv sync --frozen`; the test command then runs with uv offline. A separate quality job runs locked Ruff and Mypy. CI needs no API credentials, OpenWebUI service or user mail. Windows installs the real pywin32 package, but Outlook dispatch and background worker launch remain mocked; Linux substitutes COM imports. No tests are intentionally skipped for either OS. These checks do not validate a real Outlook profile, PST/GetTable provider behavior, WMI worker survival or screen interaction.
 
 To test an already configured embedding API with synthetic mail, provide its existing credentials through `OUTLOOK_RAG_API_KEY`, then run `uv run --frozen python tests/verify_live_api.py --url <embedding-endpoint> --model <model-id>`. Add `--uv <uv-executable>` to include the API/ANN and MCP integration scripts. The test uses temporary indexes and a local fault proxy to verify outage recovery without stopping your provider. No real Outlook mail is read; COM/WMI remain untested by this check.
 

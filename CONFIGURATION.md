@@ -44,6 +44,9 @@ Set `OUTLOOK_RAG_EMBEDDING_URL` if your endpoint differs from the default. As an
 | OUTLOOK_RAG_LEXICAL_WEIGHT | 1.0 |
 | OUTLOOK_RAG_SEARCH_MODE | hybrid; semantic, lexical, identifier, auto, metadata and thread are also supported |
 | OUTLOOK_RAG_SEARCH_NPROBES | Unset: SDK default. 1..65536 partitions probed by ANN |
+| OUTLOOK_RAG_ANN_NUM_PARTITIONS | Unset: up to 64; optional index-building setting, 1..4096 and at least 256 chunks per partition |
+| OUTLOOK_RAG_EMBEDDING_ENCODING_FORMAT | float; optional base64 with one float fallback for incompatible providers |
+| OUTLOOK_RAG_INDEX_ATTACHMENTS | false; optional bounded PDF/Office/text extraction, changes index identity; see OPERATIONS.md |
 | OUTLOOK_RAG_SEARCH_EF | Unset: SDK default. 1..65536 HNSW effort; raised to at least the current candidate count |
 | OUTLOOK_RAG_SEARCH_EXACT | false; true bypasses ANN for an exact cosine baseline |
 | OUTLOOK_RAG_CHUNK_SIZE | 1600 characters |
@@ -112,7 +115,7 @@ Folder counts come from Outlook's `Items.Count` and may include non-mail items. 
 
 ## Database changes and authentication
 
-Existing default indexes and pending worker snapshots are reused before first selecting a location. Once a root is saved, that location remains selected even if its drive is temporarily disconnected. Before creating a new automatic index, sync inspects connected store file paths only. If PSTs share one parent directory, the new root is `<PST-directory>\outlook-rag`; multiple PST directories require one explicit `OUTLOOK_RAG_DATA_ROOT`. With no PST, the fallback remains `%USERPROFILE%\Documents\Outlookファイル\outlook-rag`. All stores still share one index per model/settings; DB placement does not restrict search sources.
+Existing default indexes and pending worker snapshots are reused before first selecting a location. Once a root is saved, that location remains selected even if its drive is temporarily disconnected. Before creating a new automatic index, sync inspects connected store file paths only. If PSTs share one parent directory, the new root is `<PST-directory>\outlook-rag`; multiple PST directories require one explicit `OUTLOOK_RAG_DATA_ROOT`. With no PST, new indexes use `%LOCALAPPDATA%\outlook-rag\indexes`. All stores still share one index per model/settings; DB placement does not restrict search sources.
 
 Each root contains `<model>-<dimensions>d-<settings-id>`. The model name is sanitized for Windows; the ID separates embedding/chunk settings. Automatic placement is saved under Local AppData `outlook-rag/locations`, scoped to environment-only setup or the absolute config filename, and reused offline without Outlook calls. Explicit `DATA_ROOT` overrides automatic root/legacy lookup and is useful for choosing one PST directory; explicit `DATA_DIR` overrides both and selects an exact index directory. Neither setting moves existing data. A broken saved location fails clearly instead of silently selecting another DB. API keys remain in Local AppData.
 
