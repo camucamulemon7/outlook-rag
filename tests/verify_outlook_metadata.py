@@ -9,10 +9,10 @@ import json
 import sys
 from types import SimpleNamespace
 
-from outlook_rag import app
+from outlook_rag import app, outlook as outlook_adapter
 
 
-def probe(folder, max_rows=65):
+def probe(folder, max_rows=65, namespace=None):
     table = folder.GetTable("")
     # Reuse one table so both readers observe the same columns and sort order.
     metadata = list(
@@ -28,19 +28,32 @@ def probe(folder, max_rows=65):
         expected = dict(
             entry_id=str(row.Item("EntryID")),
             mail=str(row.Item("MessageClass")).startswith("IPM.Note"),
-            received=app.iso(row.Item("ReceivedTime")),
-            modified=app.iso(row.Item("LastModificationTime")),
+            received=app.iso(row.Item(outlook_adapter.RECEIVED), utc=True),
+            modified=app.iso(row.Item(outlook_adapter.MODIFIED), utc=True),
         )
         if source != "GetTable" or any(
             actual[key] != value for key, value in expected.items()
         ):
             raise ValueError("GetArray and GetNextRow metadata differ")
+        if namespace is not None and actual["mail"]:
+            item = namespace.GetItemFromID(actual["entry_id"], folder.StoreID)
+            for name, tag, key in (("ReceivedTime", outlook_adapter.RECEIVED, "received"),
+                                   ("LastModificationTime", outlook_adapter.MODIFIED, "modified")):
+                instant = outlook_adapter.item_date(item, name, tag)
+                if not app.same_modified(instant, actual[key]):
+                    raise ValueError("Item and table UTC properties disagree")
+                # Built-in properties are local wall times; their COM tzinfo
+                # must not be trusted as UTC. No date or mail ID is printed.
+                if not app.same_modified(app.iso(getattr(item, name)), instant):
+                    raise ValueError("Local wall time and UTC source disagree")
+            item = None
     return dict(
         passed=True,
         rows_checked=len(metadata),
         embedding_api_used=False,
         mail_bodies_read=False,
         outlook_writes=False,
+        timezone_comparison="Item UTC/local and table UTC" if namespace is not None else "table readers only",
     )
 
 
@@ -62,7 +75,7 @@ def main():
         outlook = win32com.client.Dispatch("Outlook.Application")
         namespace = outlook.GetNamespace("MAPI")
         folder = app.resolve_folder(namespace, args.folder)
-        result = probe(folder, args.max_rows)
+        result = probe(folder, args.max_rows, namespace)
     except Exception as exc:
         # COM diagnostics can contain account/folder identifiers.
         print(json.dumps(dict(passed=False, error_type=type(exc).__name__)))

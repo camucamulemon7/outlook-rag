@@ -20,6 +20,7 @@ import test_improvements as fixtures
 class MetadataArrays(unittest.TestCase):
     def test_opt_in_outlook_probe_compares_rows_without_reading_bodies(self):
         from verify_outlook_metadata import probe
+        from outlook_rag import outlook
 
         for mismatch in (False, True):
             with self.subTest(mismatch=mismatch):
@@ -55,15 +56,15 @@ class MetadataArrays(unittest.TestCase):
                                 (
                                     "EntryID",
                                     "MessageClass",
-                                    "ReceivedTime",
-                                    "LastModificationTime",
+                                    outlook.RECEIVED,
+                                    outlook.MODIFIED,
                                 ),
                                 self.source[self.position],
                             )
                         )
                         self.position += 1
                         if mismatch:
-                            values["ReceivedTime"] = "wrong"
+                            values[outlook.RECEIVED] = "wrong"
                         return SimpleNamespace(Item=lambda name: values[name])
 
                 table = Table()
