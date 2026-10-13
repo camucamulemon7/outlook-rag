@@ -6,8 +6,9 @@ Set-Content -LiteralPath $config -Value '{}'
 $global:calls = [System.Collections.Generic.List[string]]::new()
 $global:fixtureState = "running"
 function Invoke-FixtureRag {
-    param([string]$config, [Parameter(ValueFromRemainingArguments = $true)][string[]]$arguments)
-    $command = $arguments -join " "
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$arguments)
+    if ($arguments[0] -ne "--config" -or $arguments[1] -ne $config) { throw "Configuration arguments missing" }
+    $command = $arguments[2..($arguments.Count - 1)] -join " "
     $global:calls.Add($command)
     $global:LASTEXITCODE = 0
     switch ($command) {
