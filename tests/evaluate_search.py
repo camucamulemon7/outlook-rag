@@ -23,14 +23,24 @@ def validate(cases):
     if not cases:
         raise ValueError("Query set is empty")
     for case in cases:
-        if not case["query"].strip() or not isinstance(case["expected_mail_ids"], list):
-            raise ValueError("Each query requires text and a target ID list")
-        if set(case.get("filters", {})) - {"sender", "folder", "since", "until"}:
+        if not isinstance(case["query"], str) or not isinstance(
+            case["expected_mail_ids"], list
+        ):
+            raise ValueError("Each query requires a string and a target ID list")
+        if set(case.get("filters", {})) - {
+            "sender",
+            "folder",
+            "since",
+            "until",
+            "subject",
+            "recipient",
+            "cursor",
+        }:
             raise ValueError("Unsupported evaluation filter")
 
 
 def metrics(cases, results, elapsed):
-    ranks, recalls, no_answers = [], [], []
+    ranks, recalls, no_answers, evidence_recalls = [], [], [], []
     for case, result in zip(cases, results):
         expected = set(case["expected_mail_ids"])
         retrieved = [row["mail_id"] for row in result["items"]]
@@ -41,6 +51,14 @@ def metrics(cases, results, elapsed):
             recalls.append(len(expected.intersection(retrieved)) / len(expected))
         else:
             no_answers.append(not retrieved)
+        if case.get("expected_evidence_ids"):
+            evidence = set(retrieved) | {
+                source["mail_id"]
+                for item in result["items"]
+                for source in item.get("thread_context", {}).get("items", [])
+            }
+            truth = set(case["expected_evidence_ids"])
+            evidence_recalls.append(len(truth & evidence) / len(truth))
     return dict(
         queries=len(cases),
         relevant_queries=len(ranks),
@@ -58,6 +76,13 @@ def metrics(cases, results, elapsed):
         labeled_recall_at_10=statistics.mean(recalls) if recalls else None,
         no_answer_rate=statistics.mean(no_answers) if no_answers else None,
         median_ms=round(statistics.median(elapsed), 2),
+        p50_ms=round(statistics.median(elapsed), 2),
+        p95_ms=round(statistics.quantiles(elapsed, n=100, method="inclusive")[94], 2)
+        if len(elapsed) > 1
+        else round(elapsed[0], 2),
+        thread_evidence_recall=statistics.mean(evidence_recalls)
+        if evidence_recalls
+        else None,
         query_cache_hits=sum(bool(r.get("query_cache_hit")) for r in results),
         candidate_limit_warnings=sum(
             bool(
@@ -92,6 +117,12 @@ def evaluate(cases, mode="hybrid", cache="warm", min_similarity=None):
 
 def evaluate_ann(cases, k=10):
     validate(cases)
+    if any(
+        not case["query"].strip()
+        or set(case.get("filters", {})) - {"sender", "folder", "since", "until"}
+        for case in cases
+    ):
+        raise ValueError("ANN evaluation requires text and vector-supported filters")
     cfg = app.local_config()
     sql, table = storage.open_index(cfg)
     recalls, timings, exact_timings = [], [], []
@@ -174,7 +205,7 @@ def main():
     parser.add_argument(
         "--modes",
         nargs="+",
-        choices=("semantic", "hybrid", "lexical", "auto"),
+        choices=("semantic", "hybrid", "lexical", "auto", "thread", "metadata"),
         default=["semantic", "hybrid", "lexical", "auto"],
     )
     parser.add_argument("--min-similarity", type=float)
