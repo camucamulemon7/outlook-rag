@@ -33,7 +33,7 @@ def main(backend: Any) -> None:
     sync_parser.add_argument("--max-seconds", type=float)
     sync_parser.add_argument("--max-scanned", type=int)
     search_parser = sub.add_parser("search")
-    search_parser.add_argument("query")
+    search_parser.add_argument("query", nargs="?", default="", help="Required except for metadata lists")
     search_parser.add_argument("--limit", type=int, default=10)
     for name in ("folder", "sender", "since", "until"):
         search_parser.add_argument("--" + name)

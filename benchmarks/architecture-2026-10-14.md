@@ -10,6 +10,8 @@ The same 220 synthetic mails and 100 labeled questions cover 20 cases each of pa
 
 The genuine old source at `427ee3d3793bf8ac32d446b973e136f71366526a` runs from a Git archive in a separate process, with the same frozen runtime. Current source is copied once before both ablations so edits cannot change it during a measurement. Each revision builds a fresh temporary index. The small index uses exact vector search, not ANN. The baseline uses ordinary hybrid search. The routed variant selects metadata for attribute labels and thread for history labels; other labels use hybrid. Routing is explicitly supplied by labels: accuracy of OpenCode's LLM/tool selection is not measured.
 
+The measured current package is preserved in source commit `03c2374`. A subsequent CLI-only change allows the empty metadata query to be omitted on PowerShell; it does not change the measured retrieval functions.
+
 Cold runs bypass the query embedding cache. Warm runs prime the query and measure three searches, including database opening, ranking and context. P95 uses linear interpolation. OS caches are retained. Aggregate cold timing has 100 observations, category timing only 20; warm timing has three repeats per question. Revision runs are sequential, so small latency differences may reflect system/API variation, not a statistically established performance change.
 
 ## Accuracy and latency

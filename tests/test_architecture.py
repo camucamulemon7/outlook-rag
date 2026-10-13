@@ -166,7 +166,7 @@ class Architecture(unittest.TestCase):
         )
         for args in (
             ["rebuild-threads"],
-            ["search", "", "--mode", "metadata", "--subject", "PCIe"],
+            ["search", "--mode", "metadata", "--subject", "PCIe"],
         ):
             with (
                 patch("sys.argv", ["outlook-rag", *args]),
