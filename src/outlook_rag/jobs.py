@@ -157,8 +157,10 @@ def status(cfg: dict, job_id: str | None=None) -> dict:
 
 
 def start(cfg: dict, folders: list[str] | None=None, since_days: int | None=None, reconcile: bool=False) -> dict:
+    from .coverage import folder_selection
     if folders is not None and (not isinstance(folders, list) or not all(isinstance(f, str) for f in folders)):
         raise ValueError("folders must be a list of paths")
+    folder_selection(folders if folders is not None else cfg.get("folders", "auto"))
     if since_days is not None and (type(since_days) is not int or not 0 <= since_days <= 36500):
         raise ValueError("since_days must be 0..36500")
     with FileLock(root(cfg) / "start.lock", timeout=1):
