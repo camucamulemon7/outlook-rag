@@ -209,4 +209,22 @@ For full search latency, run `uv run --frozen python tests/benchmark_mail_search
 
 [MIT](LICENSE). Dependencies and embedding models have their own licenses.
 
-Code is organized into text, Outlook adapters, search, MCP adapters, CLI and worker diagnostics modules. `app.py` retains existing public entry points and coordinates configuration, storage and sync. Windows-only imports remain deferred so cached operations work on other platforms. Source functions have annotations; COM/backend boundaries use `Any`. Ruff checks syntax, imports and correctness rules, and Mypy checks annotated source including function bodies. NumPy stubs are excluded from dependency traversal because newer stubs use Python 3.12 syntax while the source targets Python 3.11.
+Implementation is organized by responsibility:
+
+| Module | Responsibility |
+| --- | --- |
+| `settings.py`, `paths.py` | Configuration/credentials/identity and stable index placement |
+| `embeddings.py` | Provider requests, vector validation and query embedding cache |
+| `database.py` | Schema initialization, locks and paired SQLite/vector publication |
+| `indexing.py` | Mail/chunk updates, embedding reuse, atomic publication and failure records |
+| `sync.py`, `outlook.py` | Bounded sync/read-ahead and read-only Outlook adapters |
+| `search.py`, `attributes.py`, `threads.py` | Ranked retrieval, SQL lists and conversation evidence |
+| `features.py` | Cached diagnostics/progress, original mail/thread reads and targeted retry |
+| `maintenance.py`, `storage.py` | Optimization/cleanup and rebuild/doctor/backup/restore |
+| `jobs.py`, `worker.py`, `diagnostics.py` | Detached job lifecycle, bootstrap and sanitized logs |
+| `server.py`, `cli.py` | MCP tool registration and command-line dispatch |
+| `app.py` | Shared runtime state, compatibility entry points and application startup |
+
+These are imported Python modules running in the same process, not new services or one subprocess per feature. The app facade supplies the shared runtime explicitly to operations, preserving existing callers and test hooks. The new operation modules do not import `app` or initialize MCP/Outlook on import. Locks and dimension/API-capability caches remain owned by the existing facade; schemas, model identities, search modes and MCP/CLI signatures are unchanged by the extraction. No database migration or re-embedding is required for this refactor.
+
+The sync state machine keeps checkpoints, read-ahead, flush and COM object access together on the calling thread. Splitting those into independently scheduled scripts would risk cursor advancement and COM/thread ownership, so they stay in one synchronization module. HTTP embedding concurrency is unchanged. Windows-only imports remain deferred so cached operations work on other platforms. Source functions have annotations; COM/backend boundaries use `Any`. Ruff checks syntax, imports and correctness rules, and Mypy checks annotated source including function bodies. NumPy stubs are excluded from dependency traversal because newer stubs use Python 3.12 syntax while the source targets Python 3.11.

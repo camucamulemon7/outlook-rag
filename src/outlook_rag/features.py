@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 import httpx
 from filelock import Timeout
 
+from . import coverage, storage, threads
+
 
 def local_config() -> dict:
     """Resolve a cached index without probing an unavailable embedding API."""
@@ -341,3 +343,64 @@ def thread(cfg: dict, mail_id: str, before: int=3, after: int=3, max_body_chars:
                         items=items,count=len(items),thread_mail_count=previous_total+1+following_total,source='local_index',
                         missing_conversation_id=not bool(anchor['conversation_id']),total_body_limit=60000,
                         has_more_previous=previous_total>len(previous),has_more_next=following_total>len(following))
+
+
+def sources(backend: Any) -> dict:
+    import pythoncom
+    import win32com.client
+    pythoncom.CoInitialize()
+    try:
+        namespace = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
+        cfg = backend.local_config()
+        report, targets = backend.discover_sources(namespace, cfg)
+        with backend.stored_sql(cfg) as sql:
+            return coverage.live_coverage(report, targets, sql, cfg)
+    finally:
+        pythoncom.CoUninitialize()
+
+
+def status(backend: Any) -> dict:
+    cfg = backend.local_config()
+    if not cfg.get('dimensions'):
+        raise ValueError('Index not initialized. Run sync_index(action="start") with the embedding API available first.')
+    with backend._LOCK:
+        sql, table = storage.open_index(cfg, writable=False)
+        try:
+            with backend.indexed_snapshot(sql, table, cfg) as table:
+                return {"folder_progress": backend.folder_progress(sql, dict(cfg, folders="auto")), "search_coverage": coverage.index_coverage(sql, cfg), "model": cfg["model"], "dimensions": cfg["dimensions"],
+                    "storage_dimensions": backend.vector_dimensions(cfg),
+                    "text_cleaning_version": cfg["text_cleaning_version"],
+                    "emails": sql.execute("SELECT count(*) FROM emails").fetchone()[0],
+                    "chunks": sql.execute("SELECT count(*) FROM chunks").fetchone()[0],
+                    "cached_embeddings": sql.execute("SELECT count(*) FROM embedding_cache").fetchone()[0],
+                    "cached_queries": sql.execute("SELECT count(*) FROM query_cache").fetchone()[0],
+                    "failed_emails": sql.execute("SELECT count(*) FROM sync_failures").fetchone()[0],
+                    "sync_max_seconds": cfg.get("sync_max_seconds", 30), "sync_max_scanned": cfg.get("sync_max_scanned", 2000),
+                    "embedding_request_dimensions": cfg.get("embedding_request_dimensions", 0),
+                    "api_dimension_reduction": backend._API_DIMENSIONS.get((cfg["embedding_url"], cfg["model"], cfg.get("embedding_request_dimensions", 0)), "unverified"),
+                    "embedding_batch_size": cfg["embedding_batch_size"], "embedding_concurrent_requests": cfg["embedding_concurrent_requests"], "sync_batch_emails": cfg["sync_batch_emails"], "sync_prefetch_emails": cfg.get("sync_prefetch_emails", 16),
+                    "vector_rows": table.count_rows(), "vector_indexes": [str(index) for index in table.list_indices()],
+                    "vector_coverage": storage.vector_status(table), "vector_metadata_filters": storage.metadata_ready(sql, table),
+                    "thread_index": threads.status(sql),
+                    "folders": [dict(row) for row in sql.execute("SELECT folder, count(*) AS emails, max(indexed_at) AS last_indexed FROM emails GROUP BY folder")],
+                    "sync_windows": [window for row in sql.execute("SELECT value FROM state WHERE key LIKE 'sync:%'")
+                                     if (window := json.loads(row[0])) and (cfg.get("folders") == "auto" or window.get("folder") in cfg["folders"])],
+                    "data_dir": cfg["data_dir"]}
+        finally:
+            sql.close()
+
+
+def get_mail(backend: Any, mail_id: str, max_body_chars: int = 10000) -> dict:
+    if not 0 <= max_body_chars <= 100000:
+        raise ValueError("max_body_chars must be 0..100000")
+    with backend._LOCK, backend.stored_sql(backend.local_config()) as sql:
+        if sql is None:
+            raise ValueError('Indexed mail not found.')
+        row = sql.execute("SELECT * FROM emails WHERE id=?", (mail_id,)).fetchone()
+        if not row:
+            raise ValueError("Indexed mail not found.")
+        result = dict(row)
+        result["body_truncated"] = len(result["body"]) > max_body_chars
+        result["body"] = result["body"][:max_body_chars]
+        result["source"] = "local_index"
+        return result
