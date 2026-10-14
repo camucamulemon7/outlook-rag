@@ -86,16 +86,60 @@ also rechecked after the final supervisor adjustment.
 
 ## Scope
 
-This verifies Windows process cleanup, COM/metadata and index lifecycle. The
-loopback vectors do not establish semantic relevance with the user's production
-embedding model. OpenCode's runtime API verifies its actual Desktop backend
-connection lifecycle; the search/error/cancellation assertions use actual MCP
-stdio clients, not a model-generated Desktop conversation. Hardware failure,
+The initial checks above verify Windows process cleanup, COM/metadata and index
+lifecycle. Their loopback vectors do not establish semantic relevance with the
+user's production embedding model. The production follow-up below adds the
+actual embedding service and model-generated Desktop tool calls. Hardware failure,
 every possible Outlook provider and arbitrary million-mail workloads are not
 covered by this sample.
 
 At the start, OpenCode's config pinned an older Outlook-RAG Git commit. After
 the user restored OpenCode, the current config and running backend had no
 Outlook-RAG registration. Tests added and removed a temporary runtime server;
-they did not install it into the user's permanent config. Version 0.9.4 needs
-the follow-up commit/PR or its tag after publication.
+they did not install it into the user's permanent config during the initial
+checks. The subsequent production follow-up installed the tested Git commit.
+Version 0.9.4 needs the follow-up commit/PR or its tag after publication.
+
+## Production settings follow-up, 2026-10-15
+
+The user's regular OpenAI-compatible service and
+`text-embedding-qwen3-embedding-4b` model were tested on the same Windows 11
+machine. Authentication and model discovery succeeded; real embeddings have
+2,560 native dimensions and use the default 1,024-dimensional local storage.
+The existing 8B database was retained separately: its 10,310 emails and 22,114
+chunks were unchanged. A fresh 4B database was populated from real Outlook.
+
+The permanent OpenCode config now pins this PR's tested executable commit
+`a34cba3c9ca5c126afc6f0d9804828e3137ab634`, with a prewarmed offline uv tool
+launch. The key was entered into a masked local dialog and saved with Windows
+DPAPI for the current user. A WMI-launched worker could not see the original
+LocalAppData key path in this environment. Copying the encrypted file to a
+shared Documents path, and using that path in the config and future key-entry
+dialog, resolved the failure. No plaintext key, private service URL, or mail
+contents are included in this report.
+
+| Production check | Result |
+| --- | --- |
+| First real API-backed sync | Created a fresh searchable 4B database; native 2,560 / stored 1,024 dimensions |
+| Japanese query through actual MCP stdio | Semantic, hybrid, lexical, metadata and thread modes each returned three items; same-session ping passed |
+| Real API query latency during sync | Semantic 1,766 ms; subsequent cached hybrid 94 ms, lexical 31 ms, metadata below 1 ms, thread 47 ms in this sample |
+| Actual OpenCode 2.0.29 Desktop conversation | Usual MiMo-V2.6-Flash Free model called index_status, semantic search and sync_index status; search returned one item, with no tool error |
+| Cancel active production sync | Request returned in 16 ms; worker reached cancelled; all 2,419 committed emails remained searchable |
+| Restart production sync | Request returned in 609 ms; new detached job resumed and continued after MCP client EOF |
+| Cold DB search from actual Desktop conversation | All seven modes returned not_initialized / count 0 / no error using the production API/model config with an empty separate data root |
+| Same Desktop conversation after cold searches | Cold index_status still responded; regular index_status returned ready with 3,387 emails; the empty data root had not been created |
+| Remove temporary Desktop MCP | All eight fixture processes exited; regular MCP stayed connected |
+| Read a production original after restart | Cached original body returned; same-session ping passed |
+| OpenCode process continuity | Backend PID unchanged throughout production search, sync cancellation/restart and cold search; no backend restart or manual MCP reconnection required |
+
+The Desktop cold fixture was registered at the conversation's actual Documents
+location. Registering a runtime server only at OpenCode's default home location
+does not expose its tools to an existing Documents conversation. This is a
+location-scoping behavior of OpenCode, separate from database initialization.
+
+The final production observation had 3,823 emails, 6,455 chunks and matching
+6,455 vector rows, with zero persisted mail, discovery or folder errors. The
+restarted worker was running after 13 cycles. Full mailbox indexing
+was still running; these checks establish first-database creation, bounded
+control operations and concurrent search, not complete mailbox coverage or a
+semantic relevance benchmark.
