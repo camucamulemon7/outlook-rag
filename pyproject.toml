@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11,<3.15"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = ["mcp>=1.30,<2", "anyio>=4,<5", "httpx>=0.28,<1", "lancedb>=0.39,<1", "filelock>=3.20,<4", "pywin32>=310; sys_platform == 'win32'", "sudachipy>=0.6,<1", "sudachidict-core"]
+dependencies = ["mcp>=1.30,<2", "anyio>=4,<5", "httpx>=0.28,<1", "lancedb>=0.39,<1", "filelock>=3.20,<5", "pywin32>=310; sys_platform == 'win32'", "sudachipy>=0.6,<1", "sudachidict-core"]
 
 [project.scripts]
 outlook-rag = "outlook_rag.entry:main"
