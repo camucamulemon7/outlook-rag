@@ -77,7 +77,7 @@ class MetadataArrays(unittest.TestCase):
                     self.assertEqual(result["rows_checked"], 2)
                     self.assertFalse(result["mail_bodies_read"])
 
-    def test_documented_column_major_batches(self):
+    def test_legacy_column_major_batches(self):
         for count in (0, 1, 2, 4, 63, 64, 65, 129):
             with self.subTest(count=count):
                 source = [
