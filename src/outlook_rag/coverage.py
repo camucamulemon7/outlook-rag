@@ -6,6 +6,8 @@ import json
 import sqlite3
 from typing import Any
 
+from .outlook import com_attr
+
 
 def folder_selection(value: Any) -> str | list[str]:
     """MCP accepts list[str]; ['auto'] explicitly selects every connected store."""
@@ -21,7 +23,7 @@ def folder_selection(value: Any) -> str | list[str]:
 
 
 def state_key(folder: Any, since_days: int = 0) -> str:
-    return f"sync:{folder.StoreID}:{folder.EntryID}:{since_days}"
+    return f"sync:{com_attr(folder, 'StoreID')}:{com_attr(folder, 'EntryID')}:{since_days}"
 
 
 def inventory(
@@ -49,7 +51,7 @@ def inventory(
         folders=[
             dict(
                 folder=name,
-                store_id=str(folder.StoreID),
+                store_id=str(com_attr(folder, "StoreID")),
                 state_key=state_key(folder, since_days),
                 source_items_estimate=counts.get(name) if since_days == 0 else None,
             )

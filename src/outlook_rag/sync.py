@@ -112,7 +112,7 @@ def sync(backend: Any, folders: list[str] | None = None, max_emails: int | None 
             rotation = sql.execute("SELECT value FROM state WHERE key=?", (rotation_key,)).fetchone()
             if rotation:
                 position = next((i for i, (_, folder) in enumerate(targets)
-                    if f"{folder.StoreID}:{folder.EntryID}" == rotation[0]), 0)
+                    if f"{outlook.com_attr(folder, 'StoreID')}:{outlook.com_attr(folder, 'EntryID')}" == rotation[0]), 0)
                 targets = targets[position:] + targets[:position]
             allowed_folders = {name for name, _ in targets}
 
@@ -160,8 +160,8 @@ def sync(backend: Any, folders: list[str] | None = None, max_emails: int | None 
                     stop_reason = stop_reason or ("email_limit" if attempted_total >= max_total_emails else "scan_limit" if scanned_total >= max_scanned else "time_limit")
                     pending_folders = [name for name, _ in targets[target_position:]]
                     break
-                store_id = folder.StoreID
-                state_key = f"sync:{store_id}:{folder.EntryID}:{since_days}"
+                store_id = outlook.com_attr(folder, "StoreID")
+                state_key = f"sync:{store_id}:{outlook.com_attr(folder, 'EntryID')}:{since_days}"
                 row = sql.execute("SELECT value FROM state WHERE key=?", (state_key,)).fetchone()
                 checkpoint = json.loads(row[0]) if row else {}
                 old_name = checkpoint.get("folder")
@@ -401,11 +401,11 @@ def sync(backend: Any, folders: list[str] | None = None, max_emails: int | None 
                 if targets:
                     next_folder = targets[(target_position + 1) % len(targets)][1]
                     with sql:
-                        sql.execute("INSERT OR REPLACE INTO state VALUES (?,?)", (rotation_key, f"{next_folder.StoreID}:{next_folder.EntryID}"))
+                        sql.execute("INSERT OR REPLACE INTO state VALUES (?,?)", (rotation_key, f"{outlook.com_attr(next_folder, 'StoreID')}:{outlook.com_attr(next_folder, 'EntryID')}"))
             if not pending_folders and targets and stop_reason:
                 pending_folders = [name for name, _ in targets[len(reports):]]
             if selection == "auto" and since_days == 0 and not stop_reason and not discovery_errors and not folder_errors and not failed_total and len(reports) == len(targets) and all(r["window_complete"] for r in reports):
-                connected = {(str(folder.StoreID), name) for name, folder in targets}
+                connected = {(str(outlook.com_attr(folder, "StoreID")), name) for name, folder in targets}
                 cached = {(str(r[0]), r[1]) for r in sql.execute("SELECT DISTINCT store_id,folder FROM emails")}
                 if cached <= connected:
                     with sql:

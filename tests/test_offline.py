@@ -308,7 +308,7 @@ class CleaningTests(unittest.TestCase):
 class DiscoveryTests(unittest.TestCase):
     def test_archive_and_subfolders_are_discovered_without_scanning_mail_bodies(self):
         def folder(name, children=(), mail=True):
-            return SimpleNamespace(Name=name,EntryID=name,DefaultItemType=0 if mail else 1,
+            return SimpleNamespace(Name=name,EntryID=name,StoreID="archive-store",DefaultItemType=0 if mail else 1,
                 Items=SimpleNamespace(Count=1),Folders=list(children))
         archive=folder("Archive",[folder("2010"),folder("Calendar",mail=False)])
         root=folder("Root",[archive,folder("Junk"),folder("Search")])
@@ -321,6 +321,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertNotIn("Archive PST/Search",paths)
         self.assertNotIn("Archive PST/Archive/Calendar",paths)
         self.assertEqual(report["stores"][0]["file_path"],"C:/archive.pst")
+        self.assertEqual(report["stores"][0]["store_id"],"archive-store")
         self.assertEqual(report["errors"],[])
 
 

@@ -1,3 +1,17 @@
+# 0.9.2
+
+- Retry required Outlook folder ID properties up to six times, with 0.2 seconds
+  between attempts, when dynamic COM lookup raises AttributeError or a COM error.
+- Apply retries during folder discovery, coverage, sync checkpoints, rotation and
+  completion reports so a transient lookup failure does not abort bulk indexing.
+- Keep the original exception after exhaustion and preserve committed mail and
+  checkpoint identities for a later restart; never substitute an empty ID.
+- Add regressions for failures after two sync cycles and immediately after a batch
+  commit, including persistent failure followed by successful restart.
+
+Existing databases and cached embeddings remain compatible. Upgrade and restart
+the MCP client before starting a new sync job to resume saved progress.
+
 # 0.9.1
 
 - Fix Outlook sync failing with `Unexpected Outlook metadata table shape` when

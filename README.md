@@ -33,7 +33,7 @@ Add the following to your OpenCode configuration. Replace the model and API key 
         "type": "local",
         "command": [
           "uvx", "--python", "3.12", "--from",
-          "git+https://github.com/camucamulemon7/outlook-rag.git@v0.9.1",
+          "git+https://github.com/camucamulemon7/outlook-rag.git@v0.9.2",
           "outlook-rag"
         ],
         "environment": {
@@ -50,23 +50,27 @@ uvx installs the server and its dependencies on first connection. No clone or se
 
 The default embedding endpoint is `http://localhost:8080/api/v1/embeddings`. Add `OUTLOOK_RAG_EMBEDDING_URL` to `environment` for another endpoint.
 
-For offline startup, replace `@v0.9.1` with the full commit SHA shown on GitHub, run that command online once, then add `--offline` after `uvx`. Keep the Python version and uv caches available. Your embedding API must still be running. A version becomes available after the main-branch CI succeeds and the release workflow publishes its tag; use the PR commit SHA when testing unreleased changes.
+For offline startup, replace `@v0.9.2` with the full commit SHA shown on GitHub, run that command online once, then add `--offline` after `uvx`. Keep the Python version and uv caches available. Your embedding API must still be running. A version becomes available after the main-branch CI succeeds and the release workflow publishes its tag; use the PR commit SHA when testing unreleased changes.
 
-### Upgrade after an Outlook metadata table error
+### Upgrade after Outlook sync errors
 
 Version 0.9.1 fixes `Unexpected Outlook metadata table shape` during sync on
 Outlook providers returning row-major Python arrays, including four-mail batches.
+Version 0.9.2 also retries transient `AttributeError` and COM errors when reading
+folder IDs during discovery, coverage and sync. Each required property is tried
+up to six times, with 0.2 seconds between attempts. Persistent failures are still
+reported; committed mail and checkpoints are retained for a new sync job.
 For a `uv tool install` installation, upgrade to the published tag with:
 
 ```powershell
-uv tool install --reinstall --python 3.12 "outlook-rag @ git+https://github.com/camucamulemon7/outlook-rag.git@v0.9.1"
+uv tool install --reinstall --python 3.12 "outlook-rag @ git+https://github.com/camucamulemon7/outlook-rag.git@v0.9.2"
 ```
 
-For the OpenCode `uvx` configuration above, update the Git pin to `@v0.9.1`.
+For the OpenCode `uvx` configuration above, update the Git pin to `@v0.9.2`.
 Restart OpenCode after upgrading so its MCP server loads the fixed code, then
 retry `sync_index(action="start")` or `outlook-rag sync`. Existing databases and
 cached embeddings are reused. Before the tag is published, use the fix PR's full
-commit SHA instead of `v0.9.1`. Preserve `[attachments]` in the package name if
+commit SHA instead of `v0.9.2`. Preserve `[attachments]` in the package name if
 you installed that optional extra.
 
 ## Usage
