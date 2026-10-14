@@ -180,3 +180,52 @@ Japanese semantic query returned one item in 1,662 ms (embedding 1,635 ms), and
 the same-session MCP ping passed. The OpenCode backend PID stayed unchanged.
 Indexing continued in the background; complete mailbox coverage was still
 pending.
+
+## Scope confirmation and time estimates, 2026-10-15
+
+The user requested a scope/period check before a potentially long initial
+index, while retaining immediate all-time indexing for an explicit all/everything
+request. The standard six-tool surface now adds sync_index(action="plan") and
+requires an explicit since_days plus confirmed=true before bulk start. An
+unconfirmed start returns confirmation_required instead of creating a job.
+Planning uses live metadata counts only, with a 15-second cooperative counting
+budget inside the existing helper hard deadline; it reads no mail bodies,
+resolves no embedding dimensions and makes no embedding requests or DB writes.
+
+On the physical Windows 11 machine, the production preview took 2,672 ms. It
+returned 2,157 / 5,976 / 22,757 candidate metadata rows for 30 / 90 / 365 days,
+and 99,434 for all time. The production index's measured rate at that observation
+was 3.828 rows/s: point estimates were about nine minutes for 30 days and seven
+hours for all time, with explicit approximate ranges. These are scan estimates,
+not guaranteed durations or exact new-mail counts. Indexed/non-mail rows,
+provider speed, mail sizes and cache reuse affect actual work. An index without
+measured throughput uses a qualified initial range assuming 1..10 rows/s;
+unknown counts leave ETA unavailable rather than reporting zero.
+
+Actual Desktop conversations used the regular API/model/key and executable
+commit 7497293 with a separate, initially absent validation data root:
+
+| Conversation/control | Observed result |
+| --- | --- |
+| Exact bare prompt: outlook-ragでdbを作成してください | plan, then a period-selection question with counts and time ranges; no DB/job existed while waiting |
+| 30-day answer to the period question | confirmed=true / since_days=30 / auto folders; real mails were indexed and no indexed mail was outside the selected period |
+| Progress for the recent job | Remaining count 1,770, measured 3.599 rows/s, point ETA 491.8 seconds with range 245.9..983.6 seconds at the sampled checkpoint |
+| New conversation: outlook-ragでdbを全部作成してください | plan, then confirmed=true / since_days=0 / auto folders; no second question tool call |
+| Progress for the all-time job | Independent job, measured ETA updated after its first cycle; full eligible scope retained |
+| Cleanup | Both validation jobs cancelled; zero validation processes remained after restoring regular config; production data retained |
+
+The previous production all-time job was cancelled with its 4,232 committed
+emails retained; this change does not silently restart it. The permanent
+configuration pins executable commit 5874541, which also fixes a cancellation
+classification race found by Windows 3.12 CI: an idle deadline can expire
+before cancellation grace, and a pending user stop now remains cancelled
+instead of failed. A delayed-cancel native regression exercises that ordering.
+
+Final checks: 256 offline tests passed on physical Windows/Python 3.12.13;
+Ruff/Mypy, wheel build and installed stdio checks passed. Actual native
+forced-exit/nested-job/descendant probes left zero survivors; real Outlook
+65-row metadata and WMI continuation/cancellation passed. The final source
+commit's nine CI jobs passed (Windows/Ubuntu Python 3.11..3.14 plus lint/types).
+Date-specific progress uses its matching checkpoint scope and preflight counts;
+a reused job reports a scope mismatch instead of claiming a newly requested
+period was applied.
