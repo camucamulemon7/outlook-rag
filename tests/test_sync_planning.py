@@ -126,6 +126,27 @@ class ConsentAndEta(unittest.TestCase):
         self.assertEqual(result['options']['since_days'], 0)
         self.assertIn('NOT applied', result['scope_warning'])
 
+    def test_job_starts_with_previewed_folders_when_config_changes(self):
+        self.backend.config.return_value = dict(data_dir='fixture', folders='auto')
+        with (patch.object(sync_planning, 'plan', return_value={'selection': ['inbox'], 'previews': [{}]}),
+              patch.object(jobs, 'start', return_value={'state': 'starting'}) as start):
+            self.tools['sync_index'](action='start', since_days=30, confirmed=True)
+        self.assertEqual(start.call_args.args[1], ['inbox'])
+
+    def test_unknown_legacy_scope_cannot_match_request_or_produce_eta(self):
+        record = dict(state='running', reused_existing_job=True, scope_known=False,
+                      options=dict(folders=None, since_days=None, reconcile=False))
+        with (patch.object(sync_planning, 'plan', return_value={'selection': 'auto', 'previews': [{}]}),
+              patch.object(jobs, 'start', return_value=record)):
+            result = self.tools['sync_index'](action='start', folders=['auto'], since_days=0, confirmed=True)
+        self.assertFalse(result['scope_matches_request'])
+        with (patch.object(features, 'local_config', return_value={'data_dir': 'fixture'}),
+              patch.object(jobs, 'status', return_value=record),
+              patch.object(features, 'progress') as progress):
+            status = self.tools['sync_index']()
+        self.assertIsNone(status['time_estimate']['estimated_seconds'])
+        progress.assert_not_called()
+
     def test_offline_job_eta_respects_period_and_preflight_counts(self):
         record = dict(state='running', options=dict(folders=['auto'], since_days=30), preflight=dict(folder_counts=[dict(folder='inbox', source_items_estimate=1000)]))
         rows = [dict(processed_items=100, processing_seconds=20, remaining_items_estimate=900)]

@@ -112,7 +112,7 @@ def plan(backend: Any, folders: list[str] | None = None, since_days: int | None 
                     model=cfg["model"], previews=previews, recommended_since_days=30 if since_days is None else since_days,
                     count_basis="Outlook metadata rows; includes indexed and non-mail items. Unchanged cached mail may scan faster.",
                     discovery_errors=report["errors"], live_outlook_access=True, embedding_api_called=False,
-                    next_action="Show scope, candidate counts and estimated time to the user and ask which period to index. Do not select a period yourself. Only after the user chooses/approves a scope, call sync_index(action='start', since_days=<chosen>, confirmed=true). An explicit 'all/everything/全部/全期間' request already approves folders=['auto'], since_days=0; no second confirmation is needed.")
+                    next_action="Show scope, candidate counts and estimated time to the user and ask which period to index. Do not select a period yourself. Only after the user chooses/approves a scope, call sync_index(action='start', since_days=<chosen>, confirmed=true). Explicit date/folder limits take precedence over 'all': all mail from last 30 days still means since_days=30. An unrestricted 'all/everything/全部/全期間' request approves folders=['auto'], since_days=0; no second confirmation is needed.")
     finally:
         folder = targets = namespace = discovered = None
         pythoncom.CoUninitialize()

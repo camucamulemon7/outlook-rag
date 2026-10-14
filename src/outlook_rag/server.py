@@ -23,7 +23,8 @@ MAIL_SEARCH_INSTRUCTIONS = (
     "sources are unindexed, incomplete or unavailable. For DB creation/update, first use sync_index(action='plan') "
     "to preview scope, counts and time. A bare 'create the DB' request does NOT approve an all-time bulk job: "
     "show 30/90/365-day and all-time choices and ask the user to select/confirm. Never silently choose a period. "
-    "If the user explicitly says all/everything/全部/全期間, use folders=['auto'], since_days=0, confirmed=true "
+    "Explicit date/folder limits take precedence over the word 'all': all mail from the last 30 days still means since_days=30. "
+    "If the user explicitly says all/everything/全部/全期間 without such a limit, use folders=['auto'], since_days=0, confirmed=true "
     "without asking again. For a user-specified period, use that since_days with confirmed=true. "
     "Start only the user-approved scope; an absent DB does not itself authorize all-time indexing. "
     "Present time_estimate as an approximate range; distinguish measured throughput from initial assumptions. "
@@ -173,7 +174,7 @@ def register_tools(mcp: FastMCP, backend: Any) -> dict[str, Callable[..., dict]]
         reconcile: bool = False,
         confirmed: bool = False,
     ) -> dict:
-        """Plan or start bulk sync. Missing confirmed=true or explicit since_days returns confirmation_required without starting. Ask the user to choose/approve a period for a bare DB-creation request. An explicit all/everything request approves folders=['auto'], since_days=0, confirmed=true. Show approximate time estimate. Existing jobs may be reused: inspect options; never claim a new scope was applied to a reused job."""
+        """Plan or start bulk sync. Missing confirmed=true or explicit since_days returns confirmation_required without starting. Ask the user to choose/approve a period for a bare DB-creation request. Explicit date/folder limits take precedence over all/everything; all mail from the last 30 days still means since_days=30. An unrestricted all/everything request approves folders=['auto'], since_days=0, confirmed=true. Show approximate time estimate. Existing jobs may be reused: inspect options; never claim a new scope was applied to a reused job."""
         from . import jobs, sync_planning
         if type(confirmed) is not bool:
             raise ValueError("confirmed must be a boolean")
@@ -181,14 +182,17 @@ def register_tools(mcp: FastMCP, backend: Any) -> dict[str, Callable[..., dict]]
         if not confirmed or since_days is None:
             return preview
         cfg = backend.config()
-        result = jobs.start(cfg, folders, since_days, reconcile, preflight=preview["previews"][0])
+        selection = preview["selection"]
+        approved_folders = ["auto"] if selection == "auto" else selection
+        result = jobs.start(cfg, approved_folders, since_days, reconcile, preflight=preview["previews"][0])
         result["scope_matches_request"] = True
         if result.get("reused_existing_job"):
             from .coverage import folder_selection
             old = result.get("options", {})
-            old_days = old.get("since_days") if old.get("since_days") is not None else cfg.get("since_days", 0)
-            result["scope_matches_request"] = (folder_selection(old.get("folders") or cfg.get("folders", "auto")) == preview["selection"]
-                and (0 if old_days == "all" else old_days) == since_days and bool(old.get("reconcile")) == reconcile)
+            result["scope_matches_request"] = (result.get("scope_known", True)
+                and old.get("folders") is not None and old.get("since_days") is not None
+                and folder_selection(old["folders"]) == selection
+                and old["since_days"] == since_days and bool(old.get("reconcile")) == reconcile)
             if not result["scope_matches_request"]:
                 result["scope_warning"] = "The existing job retains its original scope; the requested period was NOT applied. Report this and discuss stopping it before starting the requested scope."
         return result
@@ -199,8 +203,12 @@ def register_tools(mcp: FastMCP, backend: Any) -> dict[str, Callable[..., dict]]
         from . import features, jobs, sync_planning
         cfg = features.local_config()
         result = jobs.status(cfg, job_id)
+        if result.get("scope_known") is False:
+            result["folder_progress"] = []
+            result["time_estimate"] = sync_planning.estimate([])
+            return result
         options = result.get("options", {})
-        scope = dict(cfg, folders=options.get("folders") or cfg.get("folders", "auto"),
+        scope = dict(cfg, folders=options.get("folders") if options.get("folders") is not None else cfg.get("folders", "auto"),
                      _progress_since_days=options.get("since_days") if options.get("since_days") is not None else cfg.get("since_days", 0),
                      _progress_totals={r["folder"]: r["source_items_estimate"] for r in result.get("preflight", {}).get("folder_counts", [])})
         scope["folders"] = features.coverage.folder_selection(scope["folders"])
@@ -253,7 +261,23 @@ def register_tools(mcp: FastMCP, backend: Any) -> dict[str, Callable[..., dict]]
         reconcile: bool = False,
         confirmed: bool = False,
     ) -> dict:
-        """Plan, start, inspect or cancel indexing. For 'create DB' without a period, call plan first: show 30/90/365-day and all-time counts/time estimates and ASK which scope to use; never silently start all time or choose a period. plan reads Outlook metadata only, no embedding API or index writes. start requires confirmed=true AND an explicit since_days (otherwise returns confirmation_required, no job). Set confirmed=true only for the user's chosen/approved scope; an explicit all/everything/全部 request already approves folders=['auto'], since_days=0, no extra question. Positive since_days limits indexing to that recent period, without deleting older indexed mail. Default status is offline and includes an approximate remaining-time estimate; initial estimates use assumptions, later estimates use measured scan speed. Existing jobs are reused with their original options: report scope mismatches. cancel keeps committed mail. Startup/search never launch sync."""
+        """Plan, start, inspect or cancel indexing.
+
+        For 'create DB' without a period, call plan first: show 30/90/365-day and
+        all-time counts/time estimates and ASK which scope to use; never silently
+        start all time or choose a period. plan reads Outlook metadata only,
+        no embedding API or index writes. start requires confirmed=true AND
+        explicit since_days (otherwise confirmation_required, no job).
+        Set confirmed=true only for the user's chosen/approved scope. Explicit
+        date/folder limits take precedence over all/everything: all mail from
+        last 30 days still means since_days=30. An unrestricted all/everything/全部
+        request approves folders=['auto'], since_days=0 without another question.
+        Positive since_days limits indexing without deleting older indexed mail.
+        Default status is offline with approximate remaining-time estimates:
+        initial assumptions, then measured scan speed. Reused jobs retain their
+        original scope; report mismatches/unknown scope. cancel keeps committed
+        mail. Startup/search never launch sync.
+        """
         if action not in {"plan", "start", "status", "cancel"}:
             raise ValueError("action must be plan, start, status or cancel")
         if action in {"plan", "start"}:

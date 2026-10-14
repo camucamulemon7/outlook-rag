@@ -45,7 +45,7 @@ class ToolProfiles(unittest.TestCase):
 
     def test_sync_routes_and_offline_controls(self):
         with (patch.object(jobs, "start", return_value={"job_id": "fixture"}) as start,
-              patch.object(sync_planning, "plan", return_value={"previews": [{}]})):
+              patch.object(sync_planning, "plan", return_value={"selection": "auto", "previews": [{}]})):
             result = self.adapters["sync_index"]("start", folders=["auto"], since_days=0, confirmed=True)
             self.assertEqual(result["job_id"], "fixture")
             start.assert_called_once_with(self.backend.config.return_value, ["auto"], 0, False, preflight={})

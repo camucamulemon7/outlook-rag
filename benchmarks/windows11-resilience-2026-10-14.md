@@ -229,3 +229,23 @@ commit's nine CI jobs passed (Windows/Ubuntu Python 3.11..3.14 plus lint/types).
 Date-specific progress uses its matching checkpoint scope and preflight counts;
 a reused job reports a scope mismatch instead of claiming a newly requested
 period was applied.
+
+## Final PR readiness verification, 2026-10-15
+
+The final review found that older jobs could retain null scope options and
+later be interpreted using changed configuration defaults. New jobs now freeze
+their resolved folders and period at launch; legacy jobs use their own saved
+launch configuration, and a missing snapshot produces unknown scope/ETA.
+Starting a job retains the folders shown in its approved preview even if
+configuration defaults change in between. Explicit date/folder restrictions
+also take precedence over wording such as "all mail from the last 30 days".
+Six regression tests cover these cases.
+
+The final implementation passed all 262 offline tests on physical Windows 11
+with Python 3.12.13 in 88.957 seconds. Ruff, Mypy (32 source files), wheel/sdist
+build, release-pin validation and git diff whitespace checks passed. Repeated
+native forced-hang, descendant and nested-job probes reaped the process trees
+in 7.0 / 8.0 / 7.2 ms with zero survivors. Real Outlook COM metadata checks
+covered 65 rows across three stores; WMI continuation after transport EOF and
+cancellation also passed using four temporary indexed mails. No additional
+production all-time indexing was started during this final verification.

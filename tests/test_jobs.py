@@ -66,6 +66,47 @@ class BulkJobs(unittest.TestCase):
         self.assertEqual(jobs.status(self.cfg, job)['state'], 'cancelled')
         self.assertEqual(sync.call_count, 1)
 
+    def test_new_job_freezes_defaults_before_configuration_changes(self):
+        cfg = dict(self.cfg, folders=['inbox'], since_days=30)
+        with patch.object(jobs, 'launch_worker'):
+            created = jobs.start(cfg)
+        changed = dict(self.cfg, folders='auto', since_days=0)
+        state = jobs.status(changed, created['job_id'])
+        self.assertTrue(state['scope_known'])
+        self.assertEqual(state['options']['folders'], ['inbox'])
+        self.assertEqual(state['options']['since_days'], 30)
+
+    def test_legacy_job_uses_its_launch_snapshot_not_current_defaults(self):
+        cfg = dict(self.cfg, folders=['inbox'], since_days=30)
+        with patch.object(jobs, 'launch_worker'):
+            created = jobs.start(cfg)
+        path, record = jobs.load(cfg, created['job_id'])
+        record['options'].update(folders=None, since_days=None)
+        jobs.write(path, record)
+        state = jobs.status(dict(self.cfg, folders='auto', since_days=0), created['job_id'])
+        self.assertTrue(state['scope_known'])
+        self.assertEqual(state['options']['folders'], ['inbox'])
+        self.assertEqual(state['options']['since_days'], 30)
+        self.assertIsNone(jobs.load(cfg, created['job_id'])[1]['options']['since_days'])
+
+    def test_legacy_job_without_snapshot_does_not_invent_scope(self):
+        job = self.start()
+        path, record = jobs.load(self.cfg, job)
+        record['options'].update(folders=None, since_days=None)
+        jobs.write(path, record)
+        (jobs.root(self.cfg)/(job+'.config.json')).unlink()
+        state = jobs.status(dict(self.cfg, folders=['inbox'], since_days=30), job)
+        self.assertFalse(state['scope_known'])
+        self.assertIsNone(state['options']['folders'])
+        self.assertIsNone(state['options']['since_days'])
+
+    def test_invalid_configured_scope_does_not_create_job(self):
+        with patch.object(jobs, 'launch_worker') as launch:
+            with self.assertRaises(ValueError):
+                jobs.start(dict(self.cfg, since_days=-1))
+        launch.assert_not_called()
+        self.assertEqual(list(jobs.root(self.cfg).glob('*.job.json')), [])
+
     def test_exited_worker_and_resume_use_new_job(self):
         job = self.start()
         path, record = jobs.load(self.cfg, job)
