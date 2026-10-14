@@ -32,7 +32,7 @@ packages = ["src/outlook_rag"]
 [dependency-groups]
 dev = [
     "coverage>=7,<8",
-    "mypy>=1.19,<2",
+    "mypy>=1.19,<3",
     "pip-audit>=2,<3",
     "psutil>=7,<8",
     "pypdf>=6,<7",
