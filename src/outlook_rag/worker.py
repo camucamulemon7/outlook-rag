@@ -23,6 +23,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pipe")
     parser.add_argument("--authkey")
+    parser.add_argument("--execute", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--config", required=True)
     parser.add_argument("command", choices=["_job-worker"])
     parser.add_argument("job_id")
@@ -62,6 +63,19 @@ def main() -> int:
                         os.environ.update(environment)
                 timer.cancel()
             os.environ["OUTLOOK_RAG_CONFIG"] = args.config
+            if not args.execute:
+                if __package__:
+                    from .job_supervisor import supervise
+                    return supervise(args.config, args.job_id)
+                else:
+                    from job_supervisor import supervise as direct_supervise
+                    return direct_supervise(args.config, args.job_id)
+            if __package__:
+                from .process_guard import join_job
+                join_job()
+            else:
+                from process_guard import join_job as direct_join_job
+                direct_join_job()
             from outlook_rag import app, jobs
 
             resolved = app.config()

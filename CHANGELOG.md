@@ -1,3 +1,19 @@
+# 0.9.4
+
+- Preview initial sync periods (30/90/365 days/all time), metadata counts and estimated duration before asking the user to choose. MCP bulk start requires an approved explicit period; an explicit all/everything request remains supported without a second question.
+- Estimate remaining scan time from same-index measured throughput, with a qualified initial range when unmeasured; keep unknown counts unknown and scope progress to the selected period.
+
+- Reap Windows MCP helpers and parser descendants after abrupt transport death,
+  using parent-owned Job Objects registered by the actual interpreter.
+- Supervise detached native sync workers separately. Bound stalled cycles and
+  cancellation, release writer locks and retain committed mail/checkpoints.
+  Forced stops report `worker_timeout` / `cancel_timeout` and `forced_stop`.
+- Fix Windows test environments to retain TEMP/TMP/SystemRoot and restore
+  configuration patches even if fixture setup fails.
+- Add real Windows COM/WMI probes, nested-job/forced-exit checks, native worker
+  timeout/cancellation regressions and Windows CI coverage for helper ownership.
+- Keep attachment-worker type checking portable on Windows and POSIX.
+
 # 0.9.3
 
 - Start MCP without resolving embedding dimensions, reading API credentials,

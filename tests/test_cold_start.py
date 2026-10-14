@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from outlook_rag import app, features
+from outlook_test_support import isolated_environment
 
 
 class ColdIndex(unittest.TestCase):
@@ -18,13 +19,13 @@ class ColdIndex(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.index = self.root / "index"
         (self.root / "config.json").write_text("{}", encoding="utf-8")
-        self.env = patch.dict(os.environ, {
+        self.env = patch.dict(os.environ, isolated_environment({
             "OUTLOOK_RAG_MODEL": "fixture",
             "OUTLOOK_RAG_DATA_DIR": str(self.index),
             "OUTLOOK_RAG_CONFIG": str(self.root / "config.json"),
             "OUTLOOK_RAG_EMBEDDING_URL": "http://127.0.0.1:1/embeddings",
             "LOCALAPPDATA": str(self.root),
-        }, clear=True)
+        }), clear=True)
         self.env.start()
         self.addCleanup(self.env.stop)
         probe = patch.object(app, "detect_dimensions", side_effect=AssertionError("API probe forbidden"))

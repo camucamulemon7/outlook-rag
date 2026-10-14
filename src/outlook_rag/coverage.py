@@ -139,7 +139,7 @@ def index_coverage(sql: sqlite3.Connection | None, cfg: dict) -> dict:
         pending_folder_count=len(pending),
         pending_folders=pending[:20],
         retained_failures=failed,
-        next_action="Verify connected stores with list_outlook_sources. To index all connected PST archives, use sync_index(action='start') with folders=['auto'], since_days=0.",
+        next_action="Verify connected stores with list_outlook_sources. For DB creation/update use sync_index(action='plan') and show scope/count/time choices before asking which period to index. Only a user-approved scope may start with confirmed=true; explicit all/everything approves folders=['auto'], since_days=0.",
     )
 
 
@@ -203,6 +203,6 @@ def live_coverage(
         retained_failures=failed,
     )
     report["search_guidance"] = (
-        "For ordinary mail lookups, use search_emails without folder/since/until unless the user explicitly restricts them. Include PST archives. If folders remain unindexed, use folders=['auto'], since_days=0 for sync; an empty result is not proof of absence."
+        "For ordinary mail lookups, use search_emails without folder/since/until unless the user explicitly restricts them. Include PST archives. An empty result is not proof of absence. Use sync_index(action='plan') before creating/updating an index; ask the user to choose a period unless they explicitly requested all time or a specific period."
     )
     return report

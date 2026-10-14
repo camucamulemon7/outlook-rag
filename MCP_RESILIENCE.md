@@ -38,14 +38,26 @@ changing the tool profile or deadline requires a server restart.
 Ownership is tracked immediately after OS spawn, before any cancellable startup
 read or write. A 20-call startup cancellation regression verifies that no helpers
 remain. Cleanup covers initialization as well as running operations.
+Windows helpers register their actual interpreter in a parent-owned Job Object
+with `KILL_ON_JOB_CLOSE` before loading native engines. Abrupt transport death
+therefore also terminates helpers and parser descendants. Registering in the
+interpreter avoids a race when a virtualenv launcher starts a child before job
+assignment. POSIX helper timeouts/cancellation terminate the process group.
 
-Use `sync_index(action="start")` for bulk indexing. Foreground sync in the full
+Use `sync_index(action="plan")` before bulk indexing, then `sync_index(action="start", since_days=<approved>, confirmed=true)` for the approved scope. Planning does not call the embedding API or create an index. Foreground sync in the full
 profile receives a shorter cooperative budget before the hard deadline. Long
 optimization/maintenance operations can use the CLI or an increased deadline.
 A forcibly stopped write retains committed data; check job/index status before
 retrying. Existing detached sync jobs intentionally survive MCP disconnects;
-their cancel request remains cooperative at Outlook/API boundaries. The timeout
-terminates only the MCP helper, never Outlook, OpenCode or an independent job.
+their cancellation first checks Outlook/API boundaries. A separate stdlib
+supervisor owns each detached native worker. It terminates a worker after no
+cycle/status update for `max(60, sync_max_seconds + 30)` seconds, configurable
+with `worker_timeout_seconds` / `OUTLOOK_RAG_WORKER_TIMEOUT_SECONDS` (1..7200).
+Cancellation grants at most 10 seconds, bounded by this timeout, before forcing
+a stop. Status records `forced_stop` and `reason=cancel_timeout` or
+`worker_timeout`; committed mail/checkpoints are retained for a new job.
+Supervisors are independent of MCP; closing a search helper never stops a
+detached job, Outlook or OpenCode.
 
 Startup no longer warms the embedding model. `warmup_on_start` in older configs
 is accepted for compatibility and has no MCP startup effect. The first tool call
@@ -56,6 +68,8 @@ pays the native-library import cost once per helper; subsequent calls reuse it.
 ```shell
 uv run --frozen --offline python -m unittest discover -s tests -p 'test_*.py'
 uv run --frozen --offline python tests/benchmark_mcp.py --baseline-root /path/to/v0.9.2
+uv run --frozen --offline python tests/verify_windows_resilience.py
+uv run --frozen --offline python tests/verify_windows_resilience.py --real-outlook
 ```
 
 The stdio tests use real MCP clients and helper processes. They exercise no DB,
@@ -65,6 +79,13 @@ blocked calls, startup/running cancellation, four-helper saturation, concurrent 
 during a blocked call. PID checks verify helper cleanup. Windows CI uses real
 pywin32 for its COM error type and dynamic property lookup regression; it does
 not have a real Outlook mailbox or OpenCode Desktop session.
+The opt-in Windows probe checks abrupt transport death, native descendants and
+nested Job Objects under an outer watchdog. `--real-outlook` also checks actual
+GetArray/GetNextRow metadata, bounded real-mail sync into a temporary index,
+real WMI/named-pipe startup, continuation after MCP EOF, and cancellation from a
+new session. Embeddings go only to its local synthetic HTTP endpoint; output
+contains aggregate counts. Mail identifiers, bodies and credentials are omitted.
+See [the Windows 11 report](benchmarks/windows11-resilience-2026-10-14.md).
 
 On macOS/Python 3.12, a 40-mail synthetic lexical benchmark (31 calls per version,
 no API) measured the following. These numbers measure transport overhead, not

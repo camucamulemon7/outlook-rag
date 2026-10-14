@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -14,6 +16,7 @@ from anyio.streams.buffered import BufferedByteReceiveStream
 from mcp.server.fastmcp.exceptions import ToolError
 
 from outlook_rag.tool_worker import MAX_FRAME_BYTES
+from outlook_rag import process_guard
 
 
 @dataclass(eq=False)
@@ -21,6 +24,7 @@ class Helper:
     process: Process
     output: BufferedByteReceiveStream
     used_at: float = 0
+    job: Any = None
 
 
 class Pool:
@@ -36,9 +40,15 @@ class Pool:
         if helper in self.idle:
             self.idle.remove(helper)
         with anyio.CancelScope(shield=True):
+            if helper.job is not None:
+                helper.job.Close()
+                helper.job = None
             try:
                 if helper.process.returncode is None:
-                    helper.process.kill()
+                    if sys.platform == "win32":
+                        helper.process.kill()
+                    else:
+                        os.killpg(helper.process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             await helper.process.aclose()
@@ -63,10 +73,21 @@ class Pool:
                             # Track ownership before delivering cancellation after
                             # OS spawn, including before the first protocol read.
                             with anyio.CancelScope(shield=True):
-                                process = await anyio.open_process(self.command, stdin=subprocess.PIPE,
-                                                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                                job = None
+                                environment = dict(os.environ)
+                                try:
+                                    if os.name == "nt":
+                                        job_name, job = process_guard.create_job()
+                                        environment[process_guard.JOB_ENV] = job_name
+                                    process = await anyio.open_process(self.command, stdin=subprocess.PIPE,
+                                                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                                                      env=environment, start_new_session=os.name != "nt")
+                                except BaseException:
+                                    if job is not None:
+                                        job.Close()
+                                    raise
                                 assert process.stdout is not None
-                                helper = Helper(process, BufferedByteReceiveStream(process.stdout))
+                                helper = Helper(process, BufferedByteReceiveStream(process.stdout), job=job)
                                 self.helpers.add(helper)
                         assert helper is not None
                         request = json.dumps({"name": name, "arguments": arguments, "timeout": timeout}).encode() + b"\n"

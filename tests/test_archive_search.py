@@ -245,7 +245,7 @@ class ArchiveSearch(unittest.TestCase):
             patch.object(jobs, "launch_worker"),
             patch.object(app, "api_key", return_value="fixture-key"),
         ):
-            started = app.start_sync_job(folders=["auto"], since_days=0)
+            started = app.start_sync_job(folders=["auto"], since_days=0, confirmed=True)
             _, record = jobs.load(self.cfg, started["job_id"])
             self.assertEqual(record["options"]["folders"], ["auto"])
             self.assertEqual(record["options"]["since_days"], 0)

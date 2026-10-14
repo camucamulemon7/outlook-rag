@@ -183,6 +183,18 @@ def launch_worker(command: list[str], *, env: dict[str, str]) -> None:
         subprocess.Popen(worker_command, **options, start_new_session=True)
 
 
+def resolved_options(cfg: dict, folders: list[str] | None, since_days: int | None, reconcile: bool) -> dict:
+    """Freeze configuration defaults so a later config change cannot widen a job."""
+    from .coverage import folder_selection
+    selection = folder_selection(folders if folders is not None else cfg.get("folders", "auto"))
+    days = since_days if since_days is not None else cfg.get("since_days", 0)
+    if since_days is None and days == "all":
+        days = 0
+    if type(days) is not int or not 0 <= days <= 36500:
+        raise ValueError("since_days must be 0..36500")
+    return dict(folders=["auto"] if selection == "auto" else selection, since_days=days, reconcile=reconcile)
+
+
 def status(cfg: dict, job_id: str | None=None) -> dict:
     path, record = load(cfg, job_id)
     if record is None:
@@ -201,6 +213,19 @@ def status(cfg: dict, job_id: str | None=None) -> dict:
             record = dict(record, state="interrupted", reason="worker_exited")
             # Status is read-only; a later start can resume the index checkpoints.
     _, cancellation = paths(cfg, record["job_id"])
+    if isinstance(options := record.get("options"), dict):
+        # Older jobs stored None for configuration defaults. Only their own
+        # launch snapshot can establish the scope; the caller's config cannot.
+        try:
+            original = {}
+            if options.get("folders") is None or options.get("since_days") is None:
+                original = json.loads((root(cfg) / (record["job_id"] + ".config.json")).read_text(encoding="utf-8"))
+                if not isinstance(original, dict):
+                    raise ValueError("Invalid job snapshot")
+            record = dict(record, options=resolved_options(original, options.get("folders"), options.get("since_days"), bool(options.get("reconcile"))), scope_known=True)
+        except (OSError, ValueError, TypeError):
+            record = dict(record, scope_known=False,
+                          scope_warning="Original job scope is unavailable; current configuration must not be used to infer it.")
     return {key: value for key, value in record.items() if key not in ("known", "complete", "known_sources", "complete_sources")} | {
         "elapsed_ms": round(1000 * ((record.get("finished_at") or time.time()) - record["created_at"])),
         "cancel_requested": cancellation.exists(), "coverage": coverage(cfg),
@@ -208,13 +233,10 @@ def status(cfg: dict, job_id: str | None=None) -> dict:
         "recent_logs": diagnostics.recent(cfg, record["job_id"])}
 
 
-def start(cfg: dict, folders: list[str] | None=None, since_days: int | None=None, reconcile: bool=False) -> dict:
-    from .coverage import folder_selection
+def start(cfg: dict, folders: list[str] | None=None, since_days: int | None=None, reconcile: bool=False, *, preflight: dict | None=None) -> dict:
     if folders is not None and (not isinstance(folders, list) or not all(isinstance(f, str) for f in folders)):
         raise ValueError("folders must be a list of paths")
-    folder_selection(folders if folders is not None else cfg.get("folders", "auto"))
-    if since_days is not None and (type(since_days) is not int or not 0 <= since_days <= 36500):
-        raise ValueError("since_days must be 0..36500")
+    options = resolved_options(cfg, folders, since_days, reconcile)
     from . import paths as index_paths
     cfg = index_paths.prepare(cfg)
     with FileLock(root(cfg) / "start.lock", timeout=1):
@@ -230,9 +252,11 @@ def start(cfg: dict, folders: list[str] | None=None, since_days: int | None=None
         write(snapshot_path, snapshot)
         now = time.time()
         record = dict(job_id=job_id, state="starting", created_at=now, updated_at=now,
-                      options=dict(folders=folders, since_days=since_days, reconcile=reconcile),
+                      options=options,
                       cycles=0, indexed_total=0, scanned_total=0, retried_total=0,
                       known=[], complete=[], known_folders=0, completed_folders=0)
+        if preflight is not None:
+            record["preflight"] = preflight
         record["log_path"] = str(diagnostics.log_path(cfg, job_id).resolve())
         write(path, record)
         diagnostics.append(cfg, job_id, "launch_requested")

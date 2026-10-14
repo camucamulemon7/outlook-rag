@@ -33,7 +33,7 @@ Add the following to your OpenCode configuration. Replace the model and API key 
         "type": "local",
         "command": [
           "uvx", "--python", "3.12", "--from",
-          "git+https://github.com/camucamulemon7/outlook-rag.git@v0.9.3",
+          "git+https://github.com/camucamulemon7/outlook-rag.git@v0.9.4",
           "outlook-rag"
         ],
         "environment": {
@@ -50,7 +50,7 @@ uvx installs the server and its dependencies on first connection. No clone or se
 
 The default embedding endpoint is `http://localhost:8080/api/v1/embeddings`. Add `OUTLOOK_RAG_EMBEDDING_URL` to `environment` for another endpoint.
 
-For offline startup, replace `@v0.9.3` with the full commit SHA shown on GitHub, run that command online once, then add `--offline` after `uvx`. Keep the Python version and uv caches available. The embedding API is required for indexing and uncached semantic queries; MCP startup, cold-index checks and cached metadata reads work without it. A version becomes available after the main-branch CI succeeds and the release workflow publishes its tag; use the PR commit SHA when testing unreleased changes.
+For offline startup, replace `@v0.9.4` with the full commit SHA shown on GitHub, run that command online once, then add `--offline` after `uvx`. Keep the Python version and uv caches available. The embedding API is required for indexing and uncached semantic queries; MCP startup, cold-index checks and cached metadata reads work without it. A version becomes available after the main-branch CI succeeds and the release workflow publishes its tag; use the PR commit SHA when testing unreleased changes.
 
 ### Upgrade after Outlook sync errors
 
@@ -64,32 +64,36 @@ Version 0.9.3 keeps MCP connected before the first database exists, reports
 initialization in progress, and isolates native/COM operations in cancellable
 helpers. See [MCP recovery and verification](MCP_RESILIENCE.md) for deadlines,
 first-call overhead and recovery behavior.
+Version 0.9.4 also reaps helpers after forced MCP termination and supervises
+blocked detached sync workers, with bounded cancellation and retained checkpoints.
 For a `uv tool install` installation, upgrade to the published tag with:
 
 ```powershell
-uv tool install --reinstall --python 3.12 "outlook-rag @ git+https://github.com/camucamulemon7/outlook-rag.git@v0.9.3"
+uv tool install --reinstall --python 3.12 "outlook-rag @ git+https://github.com/camucamulemon7/outlook-rag.git@v0.9.4"
 ```
 
-For the OpenCode `uvx` configuration above, update the Git pin to `@v0.9.3`.
+For the OpenCode `uvx` configuration above, update the Git pin to `@v0.9.4`.
 Restart OpenCode after upgrading so its MCP server loads the fixed code, then
-retry `sync_index(action="start")` or `outlook-rag sync`. Existing databases and
+retry `sync_index(action="plan")` or `outlook-rag sync`. Existing databases and
 cached embeddings are reused. Before the tag is published, use the fix PR's full
 commit SHA instead of `v0.9.3`. Preserve `[attachments]` in the package name if
 you installed that optional extra.
 
 ## Usage
 
-1. Call `sync_index(action="start")` for indexing. It returns a `job_id` promptly and continues in a separate process. Call `sync_index(action="status", job_id=...)` to inspect progress, or `sync_index(action="cancel", job_id=...)` to request a safe stop. With no arguments, `sync_index` reports the latest job; it never starts indexing implicitly.
+1. Call `sync_index(action="plan")` to preview counts and estimated duration for the last 30/90/365 days or all time. For a bare "create the DB" request, the assistant asks which period to use. Start only the user-approved period with `sync_index(action="start", since_days=30, confirmed=true)` (change 30 to the chosen period). An explicit "all/everything" request approves `folders=["auto"], since_days=0, confirmed=true` without another question. Missing confirmation or period returns a preview without launching a job. It returns a `job_id` promptly and continues in a separate process. Call `sync_index(action="status", job_id=...)` to inspect progress, or `sync_index(action="cancel", job_id=...)` to request a safe stop. With no arguments, `sync_index` reports the latest job; it never starts indexing implicitly.
 2. Call `search_emails` with a natural-language query, then `get_indexed_mail` to read a result.
 
 Ordinary mail lookups should leave `folder`, `since` and `until` unset so search spans all indexed stores, including older mail in connected PST archives. An inbox-only live lookup can miss archived mail. Search responses report `search_scope` and `coverage`; zero hits do not establish absence from unindexed archives. Before answering that mail was not found, compare `index_status` with `list_outlook_sources`, which checks currently connected stores and pending PST folders without reading bodies or requesting embeddings.
 
-If archives have not been indexed, explicitly run `sync_index(action="start", folders=["auto"], since_days=0)`. `["auto"]` overrides an inbox-only `OUTLOOK_RAG_FOLDERS` setting and discovers all connected stores; explicit excluded/system/search folders remain excluded. `search_emails` searches existing indexed mail immediately and does not start a bulk job. An existing job can be reused, so check its `options` to confirm it covers all stores. Restart the MCP server after upgrading to reload the all-store search guidance. A client pinned to an older Git tag continues to use that tag's code.
-3. Call `sync_index(action="start")` again when you want to include new or changed mail. Sync does not run automatically.
+If archives have not been indexed and the user approves all-time indexing, run `sync_index(action="start", folders=["auto"], since_days=0, confirmed=true)`. `["auto"]` overrides an inbox-only `OUTLOOK_RAG_FOLDERS` setting and discovers all connected stores; explicit excluded/system/search folders remain excluded. `search_emails` searches existing indexed mail immediately and does not start a bulk job. An existing job can be reused, so check its `options` to confirm it covers all stores. Restart the MCP server after upgrading to reload the all-store search guidance. A client pinned to an older Git tag continues to use that tag's code.
+3. Plan and confirm the desired period again when you want to include new or changed mail. Sync does not run automatically.
+
+Time estimates use measured throughput from the same index when available; before any measurements, they show a low-confidence range assuming 1..10 metadata rows per second. Counts include already indexed/non-mail items, so cached mail can be faster. Missing counts leave the ETA unavailable. Status includes an updated `time_estimate`; estimates are not deadlines or guarantees. A recent-period sync keeps older indexed mail. Explicit date/folder restrictions take precedence over "all": "all mail from the last 30 days" stays within 30 days. Jobs retain the scope resolved at launch, even when configuration defaults change later. Older jobs recover their scope from their own launch snapshot; if it is missing, the scope/ETA is reported as unknown. If a reused job has a different scope, `scope_matches_request=false` explains that the chosen period was not applied.
 
 For a smaller foreground sync, use `outlook-rag sync --max-total-emails 10`. After bulk indexing, use `outlook-rag optimize` to build the vector search index. These commands are available through the same uvx installation command with the subcommand appended.
 
-Background jobs survive MCP disconnects. Only one bulk worker runs per database; another start returns the existing job. Cancellation is cooperative, so an in-flight Outlook/API call may finish first. After a computer restart or an interrupted worker, start another job to resume saved checkpoints and cached embeddings. A `completed_with_errors` result means some mail or folders still need attention.
+Background jobs survive MCP disconnects. Only one bulk worker runs per database; another start returns the existing job. Cancellation first stops at a safe boundary; if a call remains blocked, a separate watchdog stops the worker after at most 10 seconds (or a shorter configured worker timeout). The watchdog also stops a worker with no cycle/status update within `max(60, sync_max_seconds + 30)` seconds by default. Committed mail and checkpoints remain available; start a new job to resume. A `completed_with_errors` result means some mail or folders still need attention.
 
 Jobs track folders by store/folder ID. A renamed folder retains its progress and updates cached paths when scanned. If an unfinished folder disappears or its PST is disconnected, the job ends as `completed_with_errors` with `reason=folder_unavailable` and `missing_folders` identifying the affected scope.
 
@@ -174,7 +178,7 @@ See [Configuration](CONFIGURATION.md) for optional settings and [opencode.exampl
 
 The server does not modify Outlook mail. Email text and vectors are stored locally; cleaned text and queries are sent to your configured embedding API.
 
-Only indexed mail is searchable. New Outlook and disconnected PST files are not supported. Attachment text indexing is opt-in and requires optional parsers; extracted text is also sent to the embedding API. Deleted or moved mail is removed from the local index by `sync_index(action="start", reconcile=true)` after a complete scan. See [optional operations](OPERATIONS.md) for attachment limits, scheduled synchronization, legacy date/metadata backfill and API retry behavior.
+Only indexed mail is searchable. New Outlook and disconnected PST files are not supported. Attachment text indexing is opt-in and requires optional parsers; extracted text is also sent to the embedding API. Deleted or moved mail is removed from the local index by `sync_index(action="start", since_days=0, confirmed=true, reconcile=true)` after a complete scan. See [optional operations](OPERATIONS.md) for attachment limits, scheduled synchronization, legacy date/metadata backfill and API retry behavior.
 
 ## Development
 

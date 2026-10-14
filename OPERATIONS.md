@@ -34,7 +34,7 @@ one scheduled task per database. There is no additional service or MCP tool.
 Install optional parsers before enabling the feature:
 
 ```powershell
-uv tool install --python 3.12 "outlook-rag[attachments] @ git+https://github.com/camucamulemon7/outlook-rag.git@v0.9.3"
+uv tool install --python 3.12 "outlook-rag[attachments] @ git+https://github.com/camucamulemon7/outlook-rag.git@v0.9.4"
 ```
 
 For a uvx MCP command, add `--with pypdf --with defusedxml --with psutil` before

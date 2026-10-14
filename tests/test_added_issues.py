@@ -1,5 +1,6 @@
 """Regressions for additional search, worker diagnostics and CLI issues."""
 
+from outlook_test_support import isolated_environment
 import asyncio
 from contextlib import redirect_stdout
 import hashlib
@@ -332,6 +333,7 @@ class AddedIssues(unittest.TestCase):
         listener.accept.return_value = connection
         argv = [
             "worker",
+            "--execute",
             "--pipe",
             "synthetic-pipe",
             "--authkey",
@@ -342,7 +344,7 @@ class AddedIssues(unittest.TestCase):
             job_id,
         ]
         with (
-            patch.dict(os.environ, {}, clear=True),
+            patch.dict(os.environ, isolated_environment({}), clear=True),
             patch.object(sys, "argv", argv),
             patch(
                 "multiprocessing.connection.Listener", return_value=listener
@@ -505,7 +507,7 @@ class AddedIssues(unittest.TestCase):
                     "--reconcile",
                 ],
                 "start_sync_job",
-                (["inbox", "sent"], 7, True),
+                (["inbox", "sent"], 7, True, True),
             ),
             (
                 ["failures", "retry", "a" * 64, "b" * 64, "--max-seconds", "12"],

@@ -20,8 +20,14 @@ MAIL_SEARCH_INSTRUCTIONS = (
     "handle live actions, but a current-inbox lookup is not a substitute for an all-store archive search. "
     "Read search_scope and coverage in results. Before concluding that mail was not found, compare index_status "
     "with list_outlook_sources to verify connected PST coverage. Zero indexed results do not prove absence when "
-    "sources are unindexed, incomplete or unavailable. For an explicitly requested index update covering archives, "
-    "use sync_index(action='start') with folders=['auto'], since_days=0; this overrides an inbox-only folder setting. "
+    "sources are unindexed, incomplete or unavailable. For DB creation/update, first use sync_index(action='plan') "
+    "to preview scope, counts and time. A bare 'create the DB' request does NOT approve an all-time bulk job: "
+    "show 30/90/365-day and all-time choices and ask the user to select/confirm. Never silently choose a period. "
+    "Explicit date/folder limits take precedence over the word 'all': all mail from the last 30 days still means since_days=30. "
+    "If the user explicitly says all/everything/全部/全期間 without such a limit, use folders=['auto'], since_days=0, confirmed=true "
+    "without asking again. For a user-specified period, use that since_days with confirmed=true. "
+    "Start only the user-approved scope; an absent DB does not itself authorize all-time indexing. "
+    "Present time_estimate as an approximate range; distinguish measured throughput from initial assumptions. "
     "Report incomplete coverage and check sync_index(action='status'); use action='cancel' for an explicit stop. Do not silently start bulk sync on "
     "server startup or a search call. get_indexed_mail retrieves the original cached body. "
     "For lists defined by sender/date/subject/recipient, use mode='metadata' with query='' and explicit filters; "
@@ -54,7 +60,7 @@ def configure_tools(mcp: FastMCP, adapters: dict[str, Callable[..., dict]], prof
             if runtime is not None:
                 return await runtime.call(_function.__name__, kwargs, timeout)
             def execute() -> dict:
-                outlook = _function.__name__ in {"list_outlook_sources", "sync_emails", "retry_failed_emails", "start_sync_job"} or (_function.__name__ == "sync_index" and kwargs.get("action", "status") == "start")
+                outlook = _function.__name__ in {"list_outlook_sources", "sync_emails", "retry_failed_emails", "start_sync_job"} or (_function.__name__ == "sync_index" and kwargs.get("action", "status") in {"start", "plan"})
                 if outlook:
                     with _OUTLOOK_LOCK:
                         return _function(*args, **kwargs)
@@ -166,23 +172,53 @@ def register_tools(mcp: FastMCP, backend: Any) -> dict[str, Callable[..., dict]]
         folders: list[str] | None = None,
         since_days: int | None = None,
         reconcile: bool = False,
+        confirmed: bool = False,
     ) -> dict:
-        """Start one detached bulk sync worker per database. For archive coverage use folders=['auto'], since_days=0 to include ALL connected PST stores even with inbox-only configuration. Returns promptly with job_id and survives MCP disconnects; inspect/cancel with sync_job_status/cancel_sync_job. If an existing job is reused, check its options before assuming it covers archives."""
-        from . import jobs
-        return jobs.start(backend.config(), folders, since_days, reconcile)
+        """Plan or start bulk sync. Missing confirmed=true or explicit since_days returns confirmation_required without starting. Ask the user to choose/approve a period for a bare DB-creation request. Explicit date/folder limits take precedence over all/everything; all mail from the last 30 days still means since_days=30. An unrestricted all/everything request approves folders=['auto'], since_days=0, confirmed=true. Show approximate time estimate. Existing jobs may be reused: inspect options; never claim a new scope was applied to a reused job."""
+        from . import jobs, sync_planning
+        if type(confirmed) is not bool:
+            raise ValueError("confirmed must be a boolean")
+        preview = sync_planning.plan(backend, folders, since_days)
+        if not confirmed or since_days is None:
+            return preview
+        cfg = backend.config()
+        selection = preview["selection"]
+        approved_folders = ["auto"] if selection == "auto" else selection
+        result = jobs.start(cfg, approved_folders, since_days, reconcile, preflight=preview["previews"][0])
+        result["scope_matches_request"] = True
+        if result.get("reused_existing_job"):
+            from .coverage import folder_selection
+            old = result.get("options", {})
+            result["scope_matches_request"] = (result.get("scope_known", True)
+                and old.get("folders") is not None and old.get("since_days") is not None
+                and folder_selection(old["folders"]) == selection
+                and old["since_days"] == since_days and bool(old.get("reconcile")) == reconcile)
+            if not result["scope_matches_request"]:
+                result["scope_warning"] = "The existing job retains its original scope; the requested period was NOT applied. Report this and discuss stopping it before starting the requested scope."
+        return result
 
     @adapter(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def sync_job_status(job_id: str | None = None) -> dict:
         """Read durable bulk job progress, counters and current index coverage. Omit job_id for the latest job. Completed_with_errors means some mail or folders need retry."""
-        from . import features, jobs
+        from . import features, jobs, sync_planning
         cfg = features.local_config()
         result = jobs.status(cfg, job_id)
-        result["folder_progress"] = features.progress(cfg)["folders"]
+        if result.get("scope_known") is False:
+            result["folder_progress"] = []
+            result["time_estimate"] = sync_planning.estimate([])
+            return result
+        options = result.get("options", {})
+        scope = dict(cfg, folders=options.get("folders") if options.get("folders") is not None else cfg.get("folders", "auto"),
+                     _progress_since_days=options.get("since_days") if options.get("since_days") is not None else cfg.get("since_days", 0),
+                     _progress_totals={r["folder"]: r["source_items_estimate"] for r in result.get("preflight", {}).get("folder_counts", [])})
+        scope["folders"] = features.coverage.folder_selection(scope["folders"])
+        result["folder_progress"] = features.progress(scope)["folders"]
+        result["time_estimate"] = sync_planning.estimate(result["folder_progress"])
         return result
 
     @adapter(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
     def cancel_sync_job(job_id: str | None = None) -> dict:
-        """Request cancellation of the latest or specified bulk sync job. Stops cooperatively at safe boundaries; in-flight API/Outlook calls may finish. Keeps indexed mail and completed embedding caches."""
+        """Request cancellation of the latest or specified bulk sync job. Stops at safe boundaries; the watchdog forces a blocked worker to stop within 10 seconds (or a shorter worker timeout). Keeps committed mail and completed embedding caches."""
         from . import features, jobs
         return jobs.cancel(features.local_config(), job_id)
 
@@ -218,20 +254,40 @@ def register_tools(mcp: FastMCP, backend: Any) -> dict[str, Callable[..., dict]]
 
     @adapter(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
     def sync_index(
-        action: Literal["start", "status", "cancel"] = "status",
+        action: Literal["plan", "start", "status", "cancel"] = "status",
         job_id: str | None = None,
         folders: list[str] | None = None,
         since_days: int | None = None,
         reconcile: bool = False,
+        confirmed: bool = False,
     ) -> dict:
-        """Start, inspect or cancel detached local indexing without Outlook writes. Default status reads saved progress without Outlook/API calls. start returns promptly with job_id; use folders=['auto'], since_days=0 for all connected stores/PST archives. Existing jobs may be reused: inspect returned options. Omit job_id for latest status/cancel; cancel is cooperative and keeps indexed mail. Start only when an update is requested. Startup and search never launch sync. completed_with_errors requires inspecting/retrying failures through CLI or full tool profile."""
-        if action not in {"start", "status", "cancel"}:
-            raise ValueError("action must be start, status or cancel")
-        if action == "start":
+        """Plan, start, inspect or cancel indexing.
+
+        For 'create DB' without a period, call plan first: show 30/90/365-day and
+        all-time counts/time estimates and ASK which scope to use; never silently
+        start all time or choose a period. plan reads Outlook metadata only,
+        no embedding API or index writes. start requires confirmed=true AND
+        explicit since_days (otherwise confirmation_required, no job).
+        Set confirmed=true only for the user's chosen/approved scope. Explicit
+        date/folder limits take precedence over all/everything: all mail from
+        last 30 days still means since_days=30. An unrestricted all/everything/全部
+        request approves folders=['auto'], since_days=0 without another question.
+        Positive since_days limits indexing without deleting older indexed mail.
+        Default status is offline with approximate remaining-time estimates:
+        initial assumptions, then measured scan speed. Reused jobs retain their
+        original scope; report mismatches/unknown scope. cancel keeps committed
+        mail. Startup/search never launch sync.
+        """
+        if action not in {"plan", "start", "status", "cancel"}:
+            raise ValueError("action must be plan, start, status or cancel")
+        if action in {"plan", "start"}:
             if job_id is not None:
                 raise ValueError("job_id is only for status/cancel")
-            return start_sync_job(folders, since_days, reconcile)
-        if folders is not None or since_days is not None or reconcile:
+            if action == "plan":
+                from . import sync_planning
+                return sync_planning.plan(backend, folders, since_days)
+            return start_sync_job(folders, since_days, reconcile, confirmed)
+        if folders is not None or since_days is not None or reconcile or confirmed:
             raise ValueError("folders, since_days and reconcile are only for start")
         return sync_job_status(job_id) if action == "status" else cancel_sync_job(job_id)
 

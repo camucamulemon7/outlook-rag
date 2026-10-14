@@ -1,8 +1,19 @@
 """COM import substitutes for synthetic Outlook tests on non-Windows hosts."""
 import sys
+import os
 from contextlib import nullcontext
 from types import ModuleType
 from unittest.mock import Mock, patch
+
+
+def isolated_environment(values):
+    """Keep OS runtime essentials while removing application configuration.
+
+    Native Windows libraries need SystemRoot and a writable TEMP/TMP even in
+    an isolated fixture; clearing them breaks Winsock and Lance spill files.
+    """
+    essential = {"SYSTEMROOT", "WINDIR", "TEMP", "TMP", "PATH", "COMSPEC", "PATHEXT"}
+    return {**{key: value for key, value in os.environ.items() if key.upper() in essential}, **values}
 
 
 def synthetic_com():

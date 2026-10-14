@@ -267,6 +267,8 @@ def folder_progress(sql: sqlite3.Connection, cfg: dict) -> list[dict]:
             continue
         if not isinstance(value,dict) or not value.get('folder'):
             continue
+        if '_progress_since_days' in cfg and value.get('since_days', 0) != cfg['_progress_since_days']:
+            continue
         name = value['folder']
         timestamp = value.get('progress_updated_at') or value.get('last_run') or ''
         previous = latest.get(name,{})
@@ -277,7 +279,9 @@ def folder_progress(sql: sqlite3.Connection, cfg: dict) -> list[dict]:
         inventory = json.loads(inventory[0]) if inventory else {}
     except (ValueError,TypeError):
         inventory = {}
-    totals = {f['folder']:f.get('source_items_estimate') for f in inventory.get('folders',[])}
+    totals = {f['folder']:f.get('source_items_estimate') for f in inventory.get('folders',[])
+              if '_progress_since_days' not in cfg or inventory.get('since_days', 0) == cfg['_progress_since_days']}
+    totals.update(cfg.get('_progress_totals', {}))
     names = set(counts) | set(failed) | set(latest) | set(totals)
     if cfg.get('folders','auto') != 'auto':
         names &= set(cfg['folders'])
@@ -289,6 +293,8 @@ def folder_progress(sql: sqlite3.Connection, cfg: dict) -> list[dict]:
         known = bool(value.get('progress_known',False))
         processed = value.get('processed_rows',0) if known else None
         total = value.get('source_items_estimate') if value else totals.get(name)
+        if total is None and name in cfg.get('_progress_totals', {}):
+            total = cfg['_progress_totals'][name]
         seconds = value.get('processing_seconds',0)
         rate = processed/seconds if processed is not None and seconds > 0 and math.isfinite(seconds) else None
         remaining = 0 if complete else max(0,total-processed) if total is not None and processed is not None else total if not value else None
@@ -300,6 +306,7 @@ def folder_progress(sql: sqlite3.Connection, cfg: dict) -> list[dict]:
             source_items_estimate=total,processed_items=processed,remaining_items_estimate=remaining,
             scan_progress_percent=round(percent,2) if percent is not None else None,
             items_per_second=round(rate,3) if rate is not None else None,
+            processing_seconds=seconds,
             eta_seconds_estimate=round(eta,1) if eta is not None else None,
             updated_at=value.get('progress_updated_at') or value.get('last_run'),
             estimate_basis='Committed metadata rows; source Items.Count may include non-mail. Completion means scan complete, not all failures recovered.'))

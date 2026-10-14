@@ -1,4 +1,5 @@
 """Behavior tests for targeted recovery, resumable progress and cached threads."""
+from outlook_test_support import isolated_environment
 import hashlib
 import json
 import os
@@ -39,7 +40,7 @@ class FunctionalFeatures(unittest.TestCase):
     def test_offline_diagnostics_resolve_explicit_index_without_api_probe(self):
         self.record_failure('a')
         env=dict(OUTLOOK_RAG_MODEL='fixture',OUTLOOK_RAG_DATA_DIR=str(Path(self.cfg['data_dir']).resolve()),LOCALAPPDATA=str(Path(self.fixture.temp.name).resolve()))
-        with patch.dict(os.environ,env,clear=True),patch.object(app,'detect_dimensions',side_effect=AssertionError('API probe forbidden')):
+        with patch.dict(os.environ,isolated_environment(env),clear=True),patch.object(app,'detect_dimensions',side_effect=AssertionError('API probe forbidden')):
             cfg=features.local_config()
             self.assertEqual(cfg['dimensions'],4)
             self.assertEqual(app.list_sync_failures()['total'],1)
@@ -53,7 +54,7 @@ class FunctionalFeatures(unittest.TestCase):
         env = dict(OUTLOOK_RAG_MODEL='fixture',
                    OUTLOOK_RAG_DATA_DIR=str(Path(self.cfg['data_dir']).resolve()),
                    LOCALAPPDATA=str(Path(self.fixture.temp.name).resolve()))
-        with patch.dict(os.environ, env, clear=True), patch.object(
+        with patch.dict(os.environ, isolated_environment(env), clear=True), patch.object(
                 app, 'detect_dimensions', side_effect=AssertionError('API probe forbidden')):
             for name, invoke in (
                 ('cached mail', lambda: app.get_indexed_mail(mid)),
@@ -78,7 +79,7 @@ class FunctionalFeatures(unittest.TestCase):
         env = dict(OUTLOOK_RAG_MODEL='fixture', OUTLOOK_RAG_API_KEY='fixture-key',
                    OUTLOOK_RAG_DATA_DIR=str(Path(self.cfg['data_dir']).resolve()),
                    LOCALAPPDATA=str(Path(self.fixture.temp.name).resolve()))
-        with patch.dict(os.environ, env, clear=True), patch.object(
+        with patch.dict(os.environ, isolated_environment(env), clear=True), patch.object(
                 app, 'detect_dimensions', side_effect=AssertionError('API probe forbidden')), \
                 patch.object(app.sys, 'argv', ['outlook-rag']), \
                 patch.object(app, 'warmup_embedding_api') as warmup, patch.object(app.mcp, 'run_stdio_async') as run:
@@ -213,6 +214,18 @@ class FunctionalFeatures(unittest.TestCase):
         self.assertIsNone(result['remaining_items_estimate'])
         self.assertIsNone(result['eta_seconds_estimate'])
 
+    def test_job_progress_uses_its_period_and_preflight_total(self):
+        for days, scanned in [(0, 900), (30, 100)]:
+            value = dict(folder='inbox', since_days=days, complete=False, progress_known=True,
+                         processed_rows=scanned, processing_seconds=20, source_items_estimate=None)
+            with self.sql:
+                self.sql.execute('INSERT OR REPLACE INTO state VALUES (?,?)', ('sync:scope:' + str(days), json.dumps(value)))
+        scoped = dict(self.cfg, _progress_since_days=30, _progress_totals={'inbox': 500})
+        result = features.folder_progress(self.sql, scoped)[0]
+        self.assertEqual(result['processed_items'], 100)
+        self.assertEqual(result['remaining_items_estimate'], 400)
+        self.assertEqual(result['since_days'], 30)
+
     def test_thread_context_is_ordered_bounded_and_store_scoped(self):
         ids=[self.add(i,body='body '+str(i)) for i in range(5)]
         self.add(2,store='other')
@@ -279,7 +292,7 @@ class ReadablePaths(unittest.TestCase):
     def test_job_snapshot_recovery_preserves_settings_and_ambiguity_guards(self):
         with tempfile.TemporaryDirectory() as root:
             env = dict(LOCALAPPDATA=str(Path(root)/'local'), OUTLOOK_RAG_MODEL='snapshot-model')
-            with patch.dict(os.environ, env, clear=True), patch.object(Path, 'home', return_value=Path(root)/'home'):
+            with patch.dict(os.environ, isolated_environment(env), clear=True), patch.object(Path, 'home', return_value=Path(root)/'home'):
                 configs = []
                 for dimension in ('16', '32'):
                     with patch.dict(os.environ, {'OUTLOOK_RAG_DIMENSIONS':dimension}):
@@ -300,7 +313,7 @@ class ReadablePaths(unittest.TestCase):
             home = Path(root)/'profile'
             env = dict(LOCALAPPDATA=str(Path(root)/'local'), OUTLOOK_RAG_MODEL='starting-model',
                        OUTLOOK_RAG_DIMENSIONS='16')
-            with patch.dict(os.environ, env, clear=True), patch.object(Path, 'home', return_value=home):
+            with patch.dict(os.environ, isolated_environment(env), clear=True), patch.object(Path, 'home', return_value=home):
                 cfg = app.config()
                 with patch.object(jobs, 'launch_worker'):
                     job = jobs.start(cfg)['job_id']
@@ -315,7 +328,7 @@ class ReadablePaths(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             home=Path(root)/'profile';local=Path(root)/'local'
             env=dict(LOCALAPPDATA=str(local),TEMP=root,TMP=root,OUTLOOK_RAG_MODEL='cached-model',OUTLOOK_RAG_DIMENSIONS='16')
-            with patch.dict(os.environ,env,clear=True),patch.object(Path,'home',return_value=home):
+            with patch.dict(os.environ,isolated_environment(env),clear=True),patch.object(Path,'home',return_value=home):
                 cfg=app.config();sql,_=app.open_store(cfg);sql.close()
                 with patch.dict(os.environ,{'OUTLOOK_RAG_DIMENSIONS':'auto'}),patch.object(app,'detect_dimensions',side_effect=AssertionError('No probe')):
                     resolved=features.local_config()
@@ -334,7 +347,7 @@ class ReadablePaths(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             home=Path(root)/'profile';local=Path(root)/'local'
             env=dict(LOCALAPPDATA=str(local),OUTLOOK_RAG_MODEL='org/model',OUTLOOK_RAG_DIMENSIONS='16')
-            with patch.dict(os.environ,env,clear=True),patch.object(Path,'home',return_value=home):
+            with patch.dict(os.environ,isolated_environment(env),clear=True),patch.object(Path,'home',return_value=home):
                 cfg=app.config();preferred=Path(cfg['data_dir'])
                 self.assertTrue(preferred.name.startswith('org_model-16d-'))
                 with patch.dict(os.environ,{'OUTLOOK_RAG_CHUNK_SIZE':'800'}):

@@ -2,6 +2,8 @@
 import os
 from pathlib import Path
 import time
+import subprocess
+import sys
 
 
 def execute(name, arguments, timeout):
@@ -11,6 +13,12 @@ def execute(name, arguments, timeout):
         temporary = marker.with_name(marker.name + '.tmp')
         temporary.write_text(str(os.getpid()), encoding="utf-8")
         temporary.replace(marker)
+    if query == "spawn-hang":
+        child_marker = str(arguments["marker"]) + ".child"
+        subprocess.Popen([sys.executable, "-c",
+                          "import os,sys,time; from pathlib import Path; "
+                          "Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)", child_marker])
+        time.sleep(60)
     if query == "hang":
         time.sleep(60)
     if query == "exit":
