@@ -5,6 +5,7 @@ import json
 from collections import Counter
 from contextlib import ExitStack
 from types import SimpleNamespace
+import sys
 import threading
 import unittest
 from unittest.mock import call, patch
@@ -61,6 +62,39 @@ class ComAttributes(unittest.TestCase):
                 self.assertEqual(outlook.com_attr(source, "EntryID"), "entry")
             self.assertEqual(source.calls["EntryID"], 3)
             self.assertEqual(sleep.call_args_list, [call(.2)] * 2)
+
+    @unittest.skipUnless(sys.platform == "win32", "Real pywin32 dispatch requires Windows")
+    def test_real_pywin32_masks_getids_error_and_helper_recovers(self):
+        import pywintypes
+        from win32com.client import build, dynamic
+
+        class Dispatch:
+            failures = 1
+            lookups = 0
+
+            def GetIDsOfNames(self, _lcid, name):
+                self.lookups += 1
+                if self.failures:
+                    self.failures -= 1
+                    raise pywintypes.com_error(-2147418111, "private COM detail", None, None)
+                if name != "StoreID":
+                    raise AssertionError("Unexpected property")
+                return 42
+
+            def Invoke(self, *_args):
+                return "store"
+
+        dispatch = Dispatch()
+        proxy = dynamic.CDispatch(dispatch, build.DispatchItem(), "fixture")
+        # Exercise pywin32 itself, without Outlook or any COM server/account.
+        with self.assertRaises(AttributeError):
+            getattr(proxy, "StoreID")
+        self.assertEqual(dispatch.lookups, 1)
+        dispatch.failures, dispatch.lookups = 5, 0
+        with patch.object(outlook.time, "sleep") as sleep:
+            self.assertEqual(outlook.com_attr(proxy, "StoreID"), "store")
+        self.assertEqual(dispatch.lookups, 6)
+        self.assertEqual(sleep.call_args_list, [call(.2)] * 5)
 
     def test_unrelated_errors_are_not_retried(self):
         source = FlakyAttributes(SimpleNamespace(StoreID="store"), {"StoreID": 6}, ValueError("bug"))
