@@ -1,3 +1,15 @@
+# 0.9.1
+
+- Fix Outlook sync failing with `Unexpected Outlook metadata table shape` when
+  GetArray returns row-major Python tuples, including OST and PST stores (#53).
+- Preserve compatibility with column-major arrays and validate metadata fields
+  before accepting a batch, including ambiguous 4-by-4 batches and 64+4 tails.
+- Exercise the reported row-major layout throughout synthetic sync/recovery tests
+  and compare both layouts with the read-only Outlook metadata probe.
+
+Existing indexes remain compatible. Upgrade the installed package and restart the
+MCP client before retrying sync; a new database or embedding model is not required.
+
 # 0.9.0
 
 - Six standard MCP tools, with the complete compatibility profile available explicitly.

@@ -81,7 +81,7 @@ class Improvements(unittest.TestCase):
             def GetArray(self,n):
                 rows=metadata[self.position:self.position+n]
                 self.position+=len(rows)
-                return tuple(zip(*rows))
+                return tuple(rows)
         def get_table(expression):
             owner.filters.append(expression)
             return Table()

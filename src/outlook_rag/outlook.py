@@ -183,6 +183,50 @@ def discover_sources(namespace: Any, cfg: dict) -> tuple[dict, list]:
     return {"stores": stores, "errors": errors, "target_folders": len(targets)}, targets
 
 
+def _metadata_rows(values: Any) -> tuple[tuple[Any, ...], ...]:
+    """Normalize Python COM arrays without guessing the direction of a 4x4 batch."""
+    error = "Unexpected Outlook metadata table shape or values"
+    if values is None or isinstance(values, (tuple, list)) and not values:
+        return ()
+    if not isinstance(values, (tuple, list)) or any(
+        not isinstance(group, (tuple, list)) for group in values
+    ):
+        raise ValueError(error)
+    groups = tuple(tuple(group) for group in values)
+    if len({len(group) for group in groups}) != 1:
+        raise ValueError(error)
+    if len(groups) == 4 and not groups[0]:
+        return ()
+
+    def date_value(value: Any) -> bool:
+        if value is None or isinstance(value, datetime):
+            return True
+        if isinstance(value, str):
+            if not value:
+                return True
+            try:
+                datetime.fromisoformat(value)
+                return True
+            except ValueError:
+                pass
+        return False
+
+    candidates = []
+    if len(groups[0]) == 4:
+        candidates.append(groups)
+    if len(groups) == 4:
+        candidates.append(tuple(zip(*groups)))
+    matches = [rows for rows in candidates if all(
+        isinstance(row[0], str) and bool(row[0]) and isinstance(row[1], str)
+        and date_value(row[2]) and date_value(row[3]) for row in rows
+    )]
+    # Validate the entire batch before yielding any IDs or updating sync cursors.
+    # If both orientations match, refuse it instead of silently mixing fields.
+    if len(matches) != 1:
+        raise ValueError(error)
+    return matches[0]
+
+
 def mail_metadata(folder: Any, filters: list[str]) -> Iterator[tuple[dict, str]]:
     """Fetch lightweight table rows. Use Items only when GetTable is unavailable."""
     expression = " AND ".join(filters)
@@ -197,16 +241,12 @@ def mail_metadata(folder: Any, filters: list[str]) -> Iterator[tuple[dict, str]]
         table = None
     if table is not None:
         while not table.EndOfTable:
-            columns = table.GetArray(64)
-            if not columns:
+            # Real Outlook/pywin32 returns row-major tuples on reported hosts;
+            # also accept column-major arrays without relying on VBA dimensions.
+            rows = _metadata_rows(table.GetArray(64))
+            if not rows:
                 break
-            # Outlook SAFEARRAY dimensions are (column, row), preserved by
-            # pywin32. Validate before transposing, including square batches.
-            if len(columns) != 4 or len({len(column) for column in columns}) != 1:
-                raise ValueError("Unexpected Outlook metadata table shape")
-            if not columns[0]:
-                break
-            for row in zip(*columns):
+            for row in rows:
                 yield (
                     {
                         "entry_id": str(row[0]),
