@@ -3,9 +3,11 @@
 Verified on a physical Windows 11 Pro machine, build 26200, with Outlook
 Classic, three connected stores and real pywin32 312. The starting source was
 the #57 fix merged in PR #58 (`8c76ee2`). Follow-up changes are version 0.9.4.
-No Outlook mail was modified. Real-mail vectors were created only in temporary
-indexes, using a synthetic HTTP embedding endpoint on loopback. The report and
-probe output contain aggregate counts, never mail bodies/IDs or credentials.
+No Outlook mail was modified. Initial probes created real-mail vectors in
+temporary indexes using a synthetic HTTP embedding endpoint on loopback; the
+production follow-up below uses the user's regular service and database.
+The report and probe output contain aggregate counts, never mail bodies/IDs
+or credentials.
 
 ## Findings and fixes
 
