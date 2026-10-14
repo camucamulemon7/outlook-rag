@@ -1,3 +1,26 @@
+# 0.9.3
+
+- Start MCP without resolving embedding dimensions, reading API credentials,
+  warming the model, or importing native vector/Outlook libraries (#57).
+- Return explicit not_initialized/initializing/empty states before the first
+  vector table exists; keep actual corruption and configuration errors visible.
+- Isolate synchronous tools in a reusable process pool (maximum four helpers).
+  A configurable 30-second deadline, request cancellation and transport EOF
+  terminate blocked helpers while preserving the MCP connection for other calls.
+- Contain COM errors, SystemExit, native process exits and accidental stdout;
+  return sanitized diagnostics without serializing COM objects/exceptions.
+- Own helper processes from OS spawn through reaping, including cancellation
+  before initialization; use a private JSON channel and redirect native handles.
+- Release read-ahead COM references before CoUninitialize. Read-only job status
+  no longer creates a data directory on first use.
+- Close SQLite explicitly if schema/vector initialization fails, preserving a
+  retryable initial state without leaking the database handle.
+- Require MCP SDK 1.30+ for cancellation of in-flight handlers on transport EOF.
+  Existing CLI commands and the six standard MCP tool names remain available.
+
+Existing databases and embeddings remain compatible. MCP no longer performs
+startup warmup even if an older configuration contains warmup_on_start.
+
 # 0.9.2
 
 - Retry required Outlook folder ID properties up to six times, with 0.2 seconds

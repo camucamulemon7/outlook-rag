@@ -79,7 +79,7 @@ class FaultProxy:
 async def offline_mcp(config_path, mail_id, job_id):
     from verify_mcp import payload, server_environment
     server = StdioServerParameters(command=sys.executable, args=[
-        '-m', 'outlook_rag.app', '--config', str(config_path)], env=server_environment(config_path))
+        '-m', 'outlook_rag.entry', '--config', str(config_path)], env=server_environment(config_path))
     async with stdio_client(server) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()

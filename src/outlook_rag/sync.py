@@ -60,6 +60,14 @@ class ReadAhead:
         finally:
             self.read_ms += (time.perf_counter() - started) * 1000
 
+    def close(self) -> None:
+        """Drop queued COM items/exception frames before leaving the apartment."""
+        self.buffer.clear()
+        self.error = None
+        close = getattr(self.source, "close", None)
+        if close:
+            close()
+
 
 def sync(backend: Any, folders: list[str] | None = None, max_emails: int | None = None, since_days: int | None = None,
          reconcile: bool = False, max_total_emails: int | None = None,
@@ -94,6 +102,14 @@ def sync(backend: Any, folders: list[str] | None = None, max_emails: int | None 
     with backend.mutation_lock(cfg), httpx.Client(timeout=httpx.Timeout(120, connect=10), limits=limits, trust_env=False) as client:
         pythoncom.CoInitialize()
         sql = None
+        namespace: Any = None
+        folder: Any = None
+        next_folder: Any = None
+        item: Any = None
+        metadata: Any = None
+        ahead: Any = None
+        targets: list = []
+        pending: list = []
         try:
             namespace = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
             sql, table = backend.open_store(cfg)
@@ -197,7 +213,7 @@ def sync(backend: Any, folders: list[str] | None = None, max_emails: int | None 
                 reconcile_uncertain = checkpoint.get("reconcile_uncertain", False) if continuing else False
                 complete = True
                 batch_stats: dict[str, Any] = {}
-                pending: list[tuple[dict, dict]] = []
+                pending = []
                 metadata_source = None
                 progress_started = time.perf_counter()
                 processed_base = checkpoint.get("processed_rows", 0) if continuing else 0
@@ -411,9 +427,22 @@ def sync(backend: Any, folders: list[str] | None = None, max_emails: int | None 
                     with sql:
                         sql.execute("INSERT OR REPLACE INTO state VALUES ('outlook_dates_need_rescan','0')")
         finally:
-            if sql:
-                sql.close()
-            pythoncom.CoUninitialize()
+            try:
+                cfg.pop("_embedding_idle", None)
+                cfg.pop("_embedding_idle_ready", None)
+                try:
+                    if ahead is not None:
+                        ahead.close()
+                finally:
+                    pending.clear()
+                    metadata = item = folder = next_folder = namespace = None
+                    targets.clear()
+            finally:
+                try:
+                    if sql:
+                        sql.close()
+                finally:
+                    pythoncom.CoUninitialize()
     return dict(folders=reports, indexed_total=indexed_total, attempted_total=attempted_total,
         scanned_total=scanned_total, failed_total=failed_total, retried=retried,
         pending_folders=pending_folders, target_folders=target_folders,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, TYPE_CHECKING
 from weakref import WeakKeyDictionary
 from functools import wraps
 import threading
@@ -10,7 +10,8 @@ import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from . import features, jobs
+if TYPE_CHECKING:
+    from .tool_runtime import Pool
 
 MAIL_SEARCH_INSTRUCTIONS = (
     "For ordinary email lookup, content or meaning questions, use search_emails across ALL indexed Outlook stores, "
@@ -39,7 +40,7 @@ _OPTIONS: dict[str, dict] = {}
 _OUTLOOK_LOCK = threading.Lock()
 
 
-def configure_tools(mcp: FastMCP, adapters: dict[str, Callable[..., dict]], profile: str = "standard") -> None:
+def configure_tools(mcp: FastMCP, adapters: dict[str, Callable[..., dict]], profile: str = "standard", *, runtime: Pool | None = None, timeout: float = 30) -> None:
     """Select the public surface without removing shared CLI operations."""
     if profile not in {"standard", "full"}:
         raise ValueError("mcp_tool_profile must be 'standard' or 'full'")
@@ -50,6 +51,8 @@ def configure_tools(mcp: FastMCP, adapters: dict[str, Callable[..., dict]], prof
         function = adapters[name]
         @wraps(function)
         async def dispatch(*args: Any, _function: Callable = function, **kwargs: Any) -> dict:
+            if runtime is not None:
+                return await runtime.call(_function.__name__, kwargs, timeout)
             def execute() -> dict:
                 outlook = _function.__name__ in {"list_outlook_sources", "sync_emails", "retry_failed_emails", "start_sync_job"} or (_function.__name__ == "sync_index" and kwargs.get("action", "status") == "start")
                 if outlook:
@@ -165,11 +168,13 @@ def register_tools(mcp: FastMCP, backend: Any) -> dict[str, Callable[..., dict]]
         reconcile: bool = False,
     ) -> dict:
         """Start one detached bulk sync worker per database. For archive coverage use folders=['auto'], since_days=0 to include ALL connected PST stores even with inbox-only configuration. Returns promptly with job_id and survives MCP disconnects; inspect/cancel with sync_job_status/cancel_sync_job. If an existing job is reused, check its options before assuming it covers archives."""
+        from . import jobs
         return jobs.start(backend.config(), folders, since_days, reconcile)
 
     @adapter(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def sync_job_status(job_id: str | None = None) -> dict:
         """Read durable bulk job progress, counters and current index coverage. Omit job_id for the latest job. Completed_with_errors means some mail or folders need retry."""
+        from . import features, jobs
         cfg = features.local_config()
         result = jobs.status(cfg, job_id)
         result["folder_progress"] = features.progress(cfg)["folders"]
@@ -178,6 +183,7 @@ def register_tools(mcp: FastMCP, backend: Any) -> dict[str, Callable[..., dict]]
     @adapter(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
     def cancel_sync_job(job_id: str | None = None) -> dict:
         """Request cancellation of the latest or specified bulk sync job. Stops cooperatively at safe boundaries; in-flight API/Outlook calls may finish. Keeps indexed mail and completed embedding caches."""
+        from . import features, jobs
         return jobs.cancel(features.local_config(), job_id)
 
     @adapter(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
@@ -185,16 +191,19 @@ def register_tools(mcp: FastMCP, backend: Any) -> dict[str, Callable[..., dict]]
         limit: int = 50, offset: int = 0, folder: str | None = None
     ) -> dict:
         """List retained failed mail IDs, sanitized causes, retry counts and scheduled retry times. No mail bodies or provider calls."""
+        from . import features
         return features.failures(features.local_config(), limit, offset, folder)
 
     @adapter(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
     def retry_failed_emails(mail_ids: list[str], max_seconds: float = 30) -> dict:
         """Retry only 1..100 specified failure IDs immediately, bypassing backoff. Read-only Outlook access; preserve the index on failure. Time budget is cooperative."""
+        from . import features
         return features.retry(backend.config(), mail_ids, max_seconds)
 
     @adapter(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     def get_sync_progress() -> dict:
         """Read per-folder scan progress, indexed/failed counts and estimated remaining items, processing rate and ETA when known. No live Outlook calls."""
+        from . import features
         return features.progress(features.local_config())
 
     @adapter(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
@@ -202,6 +211,7 @@ def register_tools(mcp: FastMCP, backend: Any) -> dict[str, Callable[..., dict]]
         mail_id: str, before: int = 3, after: int = 3, max_body_chars: int = 2000
     ) -> dict:
         """Return the selected cached mail and preceding/following mail in the same Outlook store/conversation, chronologically. No live Outlook or embedding calls."""
+        from . import features
         return features.thread(
             features.local_config(), mail_id, before, after, max_body_chars
         )

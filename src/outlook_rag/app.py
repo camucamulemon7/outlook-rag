@@ -13,9 +13,9 @@ import lancedb as lancedb
 from filelock import FileLock
 from mcp.server.fastmcp import FastMCP
 
-from . import cli, search as search_engine, server
-from .features import local_config as local_config, stored_sql as stored_sql, folder_progress as folder_progress, failure_reason as failure_reason
-from .outlook import (
+from outlook_rag import cli, search as search_engine, server
+from outlook_rag.features import local_config as local_config, stored_sql as stored_sql, folder_progress as folder_progress, failure_reason as failure_reason
+from outlook_rag.outlook import (
     safe_attr as safe_attr,
     iso as iso,
     same_modified as same_modified,
@@ -27,17 +27,17 @@ from .outlook import (
     canonical_metadata as canonical_metadata,
     read_outlook_mail as read_outlook_mail,
 )
-from .text import chunks as chunks, clean_body as clean_body, safe_text as safe_text, tokens as tokens
+from outlook_rag.text import chunks as chunks, clean_body as clean_body, safe_text as safe_text, tokens as tokens
 
-from . import features as features_engine
-from . import settings as settings_engine
-from . import embeddings as embeddings_engine
-from . import indexing as indexing_engine
-from . import sync as sync_engine
-from . import maintenance as maintenance_engine
-from . import database as database_engine
-from .embeddings import SyncCancelled as SyncCancelled
-from .sync import ReadAhead as ReadAhead
+from outlook_rag import features as features_engine
+from outlook_rag import settings as settings_engine
+from outlook_rag import embeddings as embeddings_engine
+from outlook_rag import indexing as indexing_engine
+from outlook_rag import sync as sync_engine
+from outlook_rag import maintenance as maintenance_engine
+from outlook_rag import database as database_engine
+from outlook_rag.embeddings import SyncCancelled as SyncCancelled
+from outlook_rag.sync import ReadAhead as ReadAhead
 
 QUERY_INSTRUCTION = "Retrieve email passages relevant to the user's question, including paraphrases and related concepts."
 logging.getLogger("httpx").setLevel(logging.WARNING)

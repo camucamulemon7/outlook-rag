@@ -55,7 +55,7 @@ def write(path: Path, value: Any) -> None:
 
 def load(cfg: dict, job_id: str | None=None) -> tuple[Path | None, dict | None]:
     if job_id is None:
-        files = list(root(cfg).glob("*.job.json"))
+        files = list((Path(cfg["data_dir"]) / "jobs").glob("*.job.json"))
         if not files:
             return None, None
         # Worker updates must not change which job an omitted ID selects.

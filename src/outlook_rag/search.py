@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from . import attributes, coverage, storage, threads, mail_metadata, attachments
+from . import attributes, coverage, storage, threads, mail_metadata, attachments, readiness
 
 FILTER_BATCH = 1000
 
@@ -236,6 +236,12 @@ def search(
     if selected_mode == "metadata":
         if min_similarity is not None or group_by_thread:
             raise ValueError("metadata mode does not use similarity or thread grouping")
+        initial = readiness.inspect(cfg)
+        if initial['state'] != 'ready':
+            result = attributes.search(backend, cfg, query, limit, folder, sender, since, until,
+                                       subject, recipient, cursor, has_attachments, deduplicate)
+            result.update(initial)
+            return result
         return attributes.search(backend, cfg, query, limit, folder, sender, since, until,
                                  subject, recipient, cursor, has_attachments, deduplicate)
     if not query.strip():
@@ -250,6 +256,10 @@ def search(
         result["search_scope"].update(sender=sender, recipient=recipient, has_attachments=has_attachments, deduplicate=deduplicate)
         return result
 
+    initial = readiness.inspect(cfg)
+    if initial['state'] != 'ready':
+        with backend.stored_sql(cfg) as sql:
+            return finish(dict(initial, items=[], count=0), sql)
     if not (Path(cfg["data_dir"]) / "metadata.sqlite").is_file():
         return finish(
             {
