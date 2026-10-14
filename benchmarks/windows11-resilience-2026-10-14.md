@@ -145,3 +145,38 @@ restarted worker was running after 13 cycles. Full mailbox indexing
 was still running; these checks establish first-database creation, bounded
 control operations and concurrent search, not complete mailbox coverage or a
 semantic relevance benchmark.
+
+## Exact Desktop creation prompt after resetting the database
+
+The user requested a fresh test using only
+`outlook-ragでdbを作成してください` in OpenCode Desktop. The active production
+sync was cancelled and all three loaded OpenCode locations disconnected their
+MCP processes to release database handles; no matching process remained.
+Recursive deletion was rejected by the execution environment's approval
+policy, including a literal absolute-path command. Instead, the existing 4B
+database directory was moved outside the configured data root to a separate
+backup directory. The key and older 8B database were retained. This is a
+recreation from an absent active database, not a claim that the backup was
+physically deleted.
+
+Before sending the prompt, the original database path and every metadata.sqlite
+under the configured root were absent, and actual MCP index_status returned
+not_initialized / zero emails. The regular MCP configuration, model, API and
+credentials were unchanged. The same configuration was reconnected for the
+test; no temporary cold-server configuration was used.
+
+A fresh Desktop conversation with the user's usual MiMo-V2.6-Flash Free model
+received exactly that one sentence, without extra instructions. Its observed
+sequence was index_status, list_outlook_sources, tool discovery, then
+sync_index(action="start", folders=["auto"], since_days=0), followed by progress
+checks. It did not issue an email search before starting the job. All six
+Desktop tool executions completed without an assistant/tool error, and the
+Desktop response finished normally.
+
+The new database reached ready with 440 real emails / 733 chunks, native 2,560
+dimensions and 1,024-dimensional storage, with zero persisted mail failures.
+The new detached worker remained running after three cycles. An uncached
+Japanese semantic query returned one item in 1,662 ms (embedding 1,635 ms), and
+the same-session MCP ping passed. The OpenCode backend PID stayed unchanged.
+Indexing continued in the background; complete mailbox coverage was still
+pending.
