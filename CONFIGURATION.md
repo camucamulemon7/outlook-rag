@@ -34,6 +34,7 @@ Set `OUTLOOK_RAG_EMBEDDING_URL` if your endpoint differs from the default. As an
 | OUTLOOK_RAG_SYNC_MAX_EMAILS | Up to 200 mail attempts per folder per call |
 | OUTLOOK_RAG_SYNC_MAX_TOTAL_EMAILS | Up to 200 mail attempts across the entire call |
 | OUTLOOK_RAG_SYNC_MAX_SECONDS | 30-second cooperative budget; in-flight calls may overrun |
+| OUTLOOK_RAG_WORKER_TIMEOUT_SECONDS | Detached worker watchdog: default max(60, SYNC_MAX_SECONDS + 30), range 1..7200; stops a worker with no completed cycle/status update |
 | OUTLOOK_RAG_SYNC_MAX_SCANNED | 2000 new metadata rows, including unchanged/non-mail rows; cursor overlap is skipped separately |
 | OUTLOOK_RAG_SYNC_RETRY_LIMIT | Retry up to 10 due failures per call, within the overall mail/time budget |
 | OUTLOOK_RAG_QUERY_CACHE_SIZE | 256 query embeddings, evicted by least recent use; 0 disables caching |
@@ -75,7 +76,7 @@ Unreadable mail and permanent input errors are retained for retry with increasin
 
 Completed embedding requests are cached immediately, including successful requests already in flight when another request fails. A retry reuses those chunks after a process restart. Interrupted mail updates keep the previous searchable version until all replacement chunks are ready. Maintenance retains caches referenced by unfinished mail batches; references are released when a mail is published or its pending content is replaced.
 
-For indexing, call `sync_index(action="start")` once, then inspect `sync_index(action="status")`. The detached worker repeats bounded sync cycles without agent/tool invocation gaps. It survives MCP disconnects and keeps one worker per database. `sync_index(action="cancel")` requests cooperative cancellation while retaining indexed mail, checkpoints and completed embeddings. Existing sync settings apply; no additional settings are required. Startup alone does not launch a bulk job.
+For indexing, call `sync_index(action="start")` once, then inspect `sync_index(action="status")`. The detached worker repeats bounded sync cycles without agent/tool invocation gaps. It survives MCP disconnects and keeps one worker per database. Cancellation first stops cooperatively, then a separate watchdog terminates a blocked worker after at most 10 seconds (or a shorter worker timeout). No completed cycle/status update for `max(60, sync_max_seconds + 30)` seconds triggers a hard stop by default; `worker_timeout_seconds` overrides this. Forced stops report `forced_stop=true` with `reason=cancel_timeout` or `worker_timeout`. Committed mail/checkpoints remain available for a new job. Startup alone does not launch a bulk job.
 
 Job records and resolved settings are stored under `<data_dir>/jobs`. API key environment values are inherited by the worker and are not written into job snapshots. Encrypted key-file paths are retained. Worker crashes/computer restarts are reported as interrupted; start another job to resume the index. Jobs with failed mail/folders end as completed_with_errors; repeated provider outages or lack of progress end as blocked. No automatic ANN rebuild or continuous mail monitoring is performed by a bulk job.
 

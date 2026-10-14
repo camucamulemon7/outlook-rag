@@ -39,6 +39,9 @@ jobs:
         run: uv sync --frozen --python "${{ matrix.python }}"
       - name: Run offline unit tests
         run: uv run --frozen --offline coverage run --source=outlook_rag -m unittest discover -s tests -p "test_*.py" -v
+      - name: Verify Windows helper ownership after forced transport exit
+        if: matrix.os == 'windows-2025'
+        run: uv run --frozen --offline python tests/verify_windows_resilience.py
       - name: Test opt-in scheduled upkeep
         if: matrix.os == 'windows-2025' && matrix.python == '3.12'
         shell: pwsh

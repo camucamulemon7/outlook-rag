@@ -43,6 +43,9 @@ def execute(name: str, arguments: dict[str, Any], timeout: float) -> dict:
 def run(handler: Callable = execute) -> None:
     """Private JSON channel; both Python and native stdio go to the null device."""
     from outlook_rag import diagnostics
+    from outlook_rag.process_guard import join_job
+
+    join_job()
 
     incoming = os.fdopen(os.dup(sys.stdin.fileno()), "rb")
     outgoing = os.fdopen(os.dup(sys.stdout.fileno()), "wb", buffering=0)

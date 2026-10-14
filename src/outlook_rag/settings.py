@@ -41,6 +41,7 @@ def validate_values(cfg: dict) -> None:
         "sync_max_emails": (1, 2000), "sync_max_total_emails": (1, 20000),
         "since_days": (0, 36500), "sync_max_scanned": (1, 100000),
         "sync_retry_limit": (0, 200), "query_cache_size": (0, 10000),
+        "worker_timeout_seconds": (1, 7200),
         "chunk_size": (100, 16000), "chunk_overlap": (0, 15999),
         "search_candidates": (10, 5000), "rrf_k": (1, 1000),
         "search_nprobes": (1, 65536), "search_ef": (1, 65536),
@@ -103,7 +104,7 @@ def config(backend: Any, *, resolve_dimensions: bool = True) -> dict:
                   "folders": lambda value: "auto" if value.lower() == "auto" else json.loads(value),
                   "excluded_folders": json.loads, "exclude_system_folders": boolean,
                   "chunk_size": int, "chunk_overlap": int, "warmup_on_start": boolean,
-                  "sync_max_seconds": float, "mcp_tool_timeout_seconds": float, "sync_max_scanned": int, "sync_retry_limit": int,
+                  "sync_max_seconds": float, "mcp_tool_timeout_seconds": float, "sync_max_scanned": int, "sync_retry_limit": int, "worker_timeout_seconds": int,
                   "embedding_request_dimensions": int, "query_cache_size": int,
                   "search_candidates": int, "rrf_k": int, "semantic_weight": float, "lexical_weight": float,
                   "search_nprobes": int, "search_ef": int, "ann_num_partitions": int, "search_exact": boolean, "index_attachments": boolean}

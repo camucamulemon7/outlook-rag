@@ -33,7 +33,7 @@ Add the following to your OpenCode configuration. Replace the model and API key 
         "type": "local",
         "command": [
           "uvx", "--python", "3.12", "--from",
-          "git+https://github.com/camucamulemon7/outlook-rag.git@v0.9.3",
+          "git+https://github.com/camucamulemon7/outlook-rag.git@v0.9.4",
           "outlook-rag"
         ],
         "environment": {
@@ -50,7 +50,7 @@ uvx installs the server and its dependencies on first connection. No clone or se
 
 The default embedding endpoint is `http://localhost:8080/api/v1/embeddings`. Add `OUTLOOK_RAG_EMBEDDING_URL` to `environment` for another endpoint.
 
-For offline startup, replace `@v0.9.3` with the full commit SHA shown on GitHub, run that command online once, then add `--offline` after `uvx`. Keep the Python version and uv caches available. The embedding API is required for indexing and uncached semantic queries; MCP startup, cold-index checks and cached metadata reads work without it. A version becomes available after the main-branch CI succeeds and the release workflow publishes its tag; use the PR commit SHA when testing unreleased changes.
+For offline startup, replace `@v0.9.4` with the full commit SHA shown on GitHub, run that command online once, then add `--offline` after `uvx`. Keep the Python version and uv caches available. The embedding API is required for indexing and uncached semantic queries; MCP startup, cold-index checks and cached metadata reads work without it. A version becomes available after the main-branch CI succeeds and the release workflow publishes its tag; use the PR commit SHA when testing unreleased changes.
 
 ### Upgrade after Outlook sync errors
 
@@ -64,13 +64,15 @@ Version 0.9.3 keeps MCP connected before the first database exists, reports
 initialization in progress, and isolates native/COM operations in cancellable
 helpers. See [MCP recovery and verification](MCP_RESILIENCE.md) for deadlines,
 first-call overhead and recovery behavior.
+Version 0.9.4 also reaps helpers after forced MCP termination and supervises
+blocked detached sync workers, with bounded cancellation and retained checkpoints.
 For a `uv tool install` installation, upgrade to the published tag with:
 
 ```powershell
-uv tool install --reinstall --python 3.12 "outlook-rag @ git+https://github.com/camucamulemon7/outlook-rag.git@v0.9.3"
+uv tool install --reinstall --python 3.12 "outlook-rag @ git+https://github.com/camucamulemon7/outlook-rag.git@v0.9.4"
 ```
 
-For the OpenCode `uvx` configuration above, update the Git pin to `@v0.9.3`.
+For the OpenCode `uvx` configuration above, update the Git pin to `@v0.9.4`.
 Restart OpenCode after upgrading so its MCP server loads the fixed code, then
 retry `sync_index(action="start")` or `outlook-rag sync`. Existing databases and
 cached embeddings are reused. Before the tag is published, use the fix PR's full
@@ -89,7 +91,7 @@ If archives have not been indexed, explicitly run `sync_index(action="start", fo
 
 For a smaller foreground sync, use `outlook-rag sync --max-total-emails 10`. After bulk indexing, use `outlook-rag optimize` to build the vector search index. These commands are available through the same uvx installation command with the subcommand appended.
 
-Background jobs survive MCP disconnects. Only one bulk worker runs per database; another start returns the existing job. Cancellation is cooperative, so an in-flight Outlook/API call may finish first. After a computer restart or an interrupted worker, start another job to resume saved checkpoints and cached embeddings. A `completed_with_errors` result means some mail or folders still need attention.
+Background jobs survive MCP disconnects. Only one bulk worker runs per database; another start returns the existing job. Cancellation first stops at a safe boundary; if a call remains blocked, a separate watchdog stops the worker after at most 10 seconds (or a shorter configured worker timeout). The watchdog also stops a worker with no cycle/status update within `max(60, sync_max_seconds + 30)` seconds by default. Committed mail and checkpoints remain available; start a new job to resume. A `completed_with_errors` result means some mail or folders still need attention.
 
 Jobs track folders by store/folder ID. A renamed folder retains its progress and updates cached paths when scanned. If an unfinished folder disappears or its PST is disconnected, the job ends as `completed_with_errors` with `reason=folder_unavailable` and `missing_folders` identifying the affected scope.
 

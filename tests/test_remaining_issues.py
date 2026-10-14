@@ -1,4 +1,5 @@
 """Operational regressions raised in issues 16, 18, 19, 21, 23 and 25."""
+from outlook_test_support import isolated_environment
 import asyncio
 import base64
 import hashlib
@@ -30,7 +31,7 @@ class OperationalRegressions(unittest.TestCase):
             for field, value in (("sync_max_seconds", "secret-invalid"), ("excluded_folders", [1]),
                                  ("dimensions", True), ("semantic_weight", "NaN")):
                 path.write_text(json.dumps({field: value}))
-                with patch.dict(os.environ, env, clear=True), patch.object(app, "detect_dimensions") as probe:
+                with patch.dict(os.environ, isolated_environment(env), clear=True), patch.object(app, "detect_dimensions") as probe:
                     with self.assertRaisesRegex(ValueError, field) as raised:
                         app.config()
                     self.assertNotIn("secret-invalid", str(raised.exception))
@@ -74,7 +75,7 @@ class OperationalRegressions(unittest.TestCase):
             embeddings.decode_vector("!!invalid!!")
 
     def test_onedrive_notice_and_local_fallback(self):
-        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"OneDrive": root, "LOCALAPPDATA": str(Path(root).parent / "local-fixture")}, clear=True):
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, isolated_environment({"OneDrive": root, "LOCALAPPDATA": str(Path(root).parent / "local-fixture")}), clear=True):
             self.assertTrue(paths.warnings({"data_dir": str(Path(root) / "mail" / "db")}))
             self.assertFalse(paths.warnings({"data_dir": str(paths.fallback_root())}))
 
@@ -116,7 +117,7 @@ class OperationalRegressions(unittest.TestCase):
             cfg = dict(key_file=str(path))
             decrypt = Mock(side_effect=lambda value, *args: (None, b"decoded-" + value))
             settings._KEY_CACHE.clear()
-            with patch.dict(os.environ, {}, clear=True), patch.dict("sys.modules", {"win32crypt": SimpleNamespace(CryptUnprotectData=decrypt)}):
+            with patch.dict(os.environ, isolated_environment({}), clear=True), patch.dict("sys.modules", {"win32crypt": SimpleNamespace(CryptUnprotectData=decrypt)}):
                 self.assertEqual(app.api_key(cfg), "decoded-first")
                 self.assertEqual(app.api_key(cfg), "decoded-first")
                 self.assertEqual(decrypt.call_count, 1)

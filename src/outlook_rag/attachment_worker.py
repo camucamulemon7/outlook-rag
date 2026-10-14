@@ -1,7 +1,6 @@
 """Bounded, isolated extraction; never imports the MCP server or credentials."""
 from __future__ import annotations
 import json
-import os
 from pathlib import Path
 import sys
 import zipfile
@@ -11,7 +10,7 @@ MAX_TEXT = 100000
 
 def constrain() -> object:
     limit = 1024 * 1024 * 1024
-    if os.name == "nt":
+    if sys.platform == "win32":
         import win32api
         import win32job
         job = win32job.CreateJobObject(None, "")

@@ -1,4 +1,5 @@
 """No email account, API server or API key required. Run with unittest discovery."""
+from outlook_test_support import isolated_environment
 import hashlib
 import json
 import math
@@ -189,7 +190,7 @@ class ConfigTests(unittest.TestCase):
         app._DIMENSIONS.clear()
         transport = httpx.MockTransport(lambda request: httpx.Response(200,json={"data":[{"index":0,"embedding":[1.0]*16}]}))
         actual_client = httpx.Client
-        with patch.dict(os.environ, {"OUTLOOK_RAG_MODEL":"fixture-auto", "OUTLOOK_RAG_API_KEY":"fixture", "USERPROFILE":str(Path('work/profile').resolve()), "LOCALAPPDATA":str(Path('work').resolve())},clear=True):
+        with patch.dict(os.environ, isolated_environment({"OUTLOOK_RAG_MODEL":"fixture-auto", "OUTLOOK_RAG_API_KEY":"fixture", "USERPROFILE":str(Path('work/profile').resolve()), "LOCALAPPDATA":str(Path('work').resolve())}),clear=True):
             with patch.object(app.httpx,"Client",side_effect=lambda **kwargs:actual_client(transport=transport,**kwargs)) as clients:
                 cfg=app.config()
                 app.config()
@@ -206,7 +207,7 @@ class ConfigTests(unittest.TestCase):
             local = Path(root) / "local"
             env = dict(LOCALAPPDATA=str(local), OUTLOOK_RAG_MODEL="fixture-path",
                        OUTLOOK_RAG_DIMENSIONS="16")
-            with patch.dict(os.environ, env, clear=True), patch.object(Path, "home", return_value=home):
+            with patch.dict(os.environ, isolated_environment(env), clear=True), patch.object(Path, "home", return_value=home):
                 cfg = app.config()
                 preferred = Path(cfg["data_dir"])
                 self.assertEqual(preferred.parent, local / "outlook-rag" / "indexes")
@@ -227,7 +228,7 @@ class ConfigTests(unittest.TestCase):
         env = dict(LOCALAPPDATA=str(Path('work').resolve()), OUTLOOK_RAG_EMBEDDING_URL="http://fixture.invalid", OUTLOOK_RAG_MODEL="generic",
                    OUTLOOK_RAG_DIMENSIONS="768", OUTLOOK_RAG_DATA_DIR="./fixture-data",
                    OUTLOOK_RAG_SINCE_DAYS="all", OUTLOOK_RAG_FOLDERS='["inbox"]')
-        with patch.dict(os.environ, env, clear=True):
+        with patch.dict(os.environ, isolated_environment(env), clear=True):
             cfg = app.config()
         self.assertEqual(cfg["since_days"], 0)
         self.assertEqual(cfg["dimensions"], 768)

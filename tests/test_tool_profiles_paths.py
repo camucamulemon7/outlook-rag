@@ -1,4 +1,5 @@
 """Public MCP surface and durable PST-adjacent index selection."""
+from outlook_test_support import isolated_environment
 import asyncio
 from contextlib import ExitStack
 import json
@@ -69,8 +70,8 @@ class IndexPlacement(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.temp = self.stack.enter_context(tempfile.TemporaryDirectory())
         self.root = Path(self.temp).resolve()
-        self.stack.enter_context(patch.dict(os.environ, dict(LOCALAPPDATA=str(self.root / "local"),
-            OUTLOOK_RAG_MODEL="fixture", OUTLOOK_RAG_DIMENSIONS="4"), clear=True))
+        self.stack.enter_context(patch.dict(os.environ, isolated_environment(dict(LOCALAPPDATA=str(self.root / "local"),
+            OUTLOOK_RAG_MODEL="fixture", OUTLOOK_RAG_DIMENSIONS="4")), clear=True))
         self.stack.enter_context(patch.object(Path, "home", return_value=self.root / "home"))
         self.real_discovery = paths.connected_pst_directories
         self.discovery = self.stack.enter_context(patch.object(paths, "connected_pst_directories", return_value=[self.root / "メール"] ))

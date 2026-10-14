@@ -182,7 +182,7 @@ def register_tools(mcp: FastMCP, backend: Any) -> dict[str, Callable[..., dict]]
 
     @adapter(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
     def cancel_sync_job(job_id: str | None = None) -> dict:
-        """Request cancellation of the latest or specified bulk sync job. Stops cooperatively at safe boundaries; in-flight API/Outlook calls may finish. Keeps indexed mail and completed embedding caches."""
+        """Request cancellation of the latest or specified bulk sync job. Stops at safe boundaries; the watchdog forces a blocked worker to stop within 10 seconds (or a shorter worker timeout). Keeps committed mail and completed embedding caches."""
         from . import features, jobs
         return jobs.cancel(features.local_config(), job_id)
 

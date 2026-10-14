@@ -514,20 +514,24 @@ with patch.object(app, 'embed', side_effect=lambda texts, *a, **kw: [[0., 1.] fo
 
 class OfflineCandidates(unittest.TestCase):
     def setUp(self):
+        from outlook_test_support import isolated_environment
         self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.environment = patch.dict(
             os.environ,
-            dict(
+            isolated_environment(dict(
                 OUTLOOK_RAG_MODEL="cached",
                 OUTLOOK_RAG_DIMENSIONS="4",
                 LOCALAPPDATA=str(self.root / "local"),
-            ),
+            )),
             clear=True,
         )
         self.environment.start()
+        self.addCleanup(self.environment.stop)
         self.home = patch.object(Path, "home", return_value=self.root / "home")
         self.home.start()
+        self.addCleanup(self.home.stop)
         self.cfg = app.config()
         self.normal_directory = Path(self.cfg["data_dir"])
         sql, _ = app.open_store(self.cfg)
@@ -537,12 +541,7 @@ class OfflineCandidates(unittest.TestCase):
             app, "detect_dimensions", side_effect=AssertionError("API probe forbidden")
         )
         self.probe.start()
-
-    def tearDown(self):
-        self.probe.stop()
-        self.home.stop()
-        self.environment.stop()
-        self.temp.cleanup()
+        self.addCleanup(self.probe.stop)
 
     def bad_candidate(self, name, body):
         folder = Path(self.cfg["data_dir"]).parent / name

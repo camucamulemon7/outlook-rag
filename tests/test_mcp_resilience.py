@@ -34,6 +34,27 @@ def payload(result):
 
 
 class StdioResilience(unittest.TestCase):
+    def test_timeout_reaps_native_descendants_and_session_recovers(self):
+        async def exercise():
+            with tempfile.TemporaryDirectory() as folder:
+                marker = Path(folder) / 'native'
+                async with connect([str(ROOT / 'tests' / 'mcp_fault_server.py'), '5']) as session:
+                    task = asyncio.create_task(session.call_tool('search_emails', {'query': 'spawn-hang', 'marker': str(marker)}))
+                    child_marker = Path(str(marker) + '.child')
+                    while not child_marker.exists():
+                        await asyncio.sleep(.02)
+                    pids = {int(marker.read_text()), int(child_marker.read_text())}
+                    result = await task
+                    self.assertTrue(result.isError)
+                    for _ in range(100):
+                        if all(not psutil.pid_exists(pid) for pid in pids):
+                            break
+                        await asyncio.sleep(.02)
+                    self.assertTrue(all(not psutil.pid_exists(pid) for pid in pids))
+                    await session.send_ping()
+                    self.assertFalse((await session.call_tool('index_status', {})).isError)
+        asyncio.run(exercise())
+
     def test_cold_start_without_dimensions_key_api_or_outlook(self):
         async def exercise():
             with tempfile.TemporaryDirectory() as folder:
@@ -169,7 +190,7 @@ class StdioResilience(unittest.TestCase):
         from outlook_rag.tool_runtime import Pool
         async def exercise():
             before = {process.pid for process in psutil.Process().children()}
-            runtime = Pool([sys.executable, '-c', 'import time; time.sleep(60)'])
+            runtime = Pool()
             try:
                 for _ in range(20):
                     with anyio.move_on_after(.02):
