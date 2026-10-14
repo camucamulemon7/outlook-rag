@@ -14,7 +14,7 @@ from outlook_rag import worker, jobs as job_control
 
 
 class WorkerWatchdog(unittest.TestCase):
-    def exercise(self, cancel):
+    def exercise(self, cancel, cancel_delay=0):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             package = root / 'outlook_rag'
@@ -69,6 +69,7 @@ def run(job_id,cfg):
                     time.sleep(.02)
                 native = psutil.Process(int(marker.read_text()))
                 if cancel:
+                    time.sleep(cancel_delay)
                     (jobs / (job_id + '.cancel')).touch()
                 while process.poll() is None:
                     job_control.status(cfg, job_id)
@@ -97,3 +98,6 @@ def run(job_id,cfg):
 
     def test_stuck_native_sync_cancellation_is_bounded(self):
         self.exercise(True)
+
+    def test_idle_deadline_before_cancel_grace_preserves_cancel_state(self):
+        self.exercise(True, cancel_delay=.3)

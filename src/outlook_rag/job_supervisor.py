@@ -52,8 +52,11 @@ def supervise(config_path: str, job_id: str) -> int:
                 last_update, heartbeat = updated, now
             if flag.exists() and cancelled_at is None:
                 cancelled_at = now
-            cancelled = cancelled_at is not None and now - cancelled_at >= cancel_grace
-            if cancelled or now - heartbeat >= timeout:
+            cancel_expired = cancelled_at is not None and now - cancelled_at >= cancel_grace
+            if cancel_expired or now - heartbeat >= timeout:
+                # The idle deadline can precede the cancellation grace. A
+                # pending user stop must still finish as cancelled, not failed.
+                cancelled = cancelled_at is not None
                 if job is not None:
                     job.Close()
                     job = None
