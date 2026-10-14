@@ -10,7 +10,7 @@ import sys
 from importlib.metadata import version
 from typing import Any
 
-from . import features, jobs, storage, threads, server
+from . import features, jobs, storage, threads
 
 
 def main(backend: Any) -> None:
@@ -98,6 +98,10 @@ def main(backend: Any) -> None:
     args = parser.parse_args()
     if args.config:
         os.environ["OUTLOOK_RAG_CONFIG"] = args.config
+    if args.command is None:
+        from . import entry
+        entry.serve(backend.mcp, backend._tools)
+        return
     offline = (
         args.command
         in (
@@ -116,10 +120,8 @@ def main(backend: Any) -> None:
         or (args.command == "job" and args.action != "start")
         or (args.command == "failures" and args.action == "list")
     )
-    if offline or args.command is None:
+    if offline:
         cfg = features.local_config()
-        if args.command is None and not cfg.get("dimensions"):
-            cfg = backend.config()
     else:
         cfg = backend.config(resolve_dimensions=args.command != "set-key")
     if args.command == "_job-worker":
@@ -220,14 +222,6 @@ def main(backend: Any) -> None:
         result = storage.backup_index(cfg, args.destination)
     elif args.command == "restore-index":
         result = storage.restore_index(cfg, args.source, args.destination)
-    else:
-        server.configure_tools(backend.mcp, backend._tools, cfg.get("mcp_tool_profile", "standard"))
-        if cfg.get("warmup_on_start", True):
-            backend.threading.Thread(
-                target=backend.warmup_embedding_api, daemon=True
-            ).start()
-        backend.mcp.run(transport="stdio")
-        return
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False, indent=2))

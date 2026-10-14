@@ -594,7 +594,7 @@ class OfflineCandidates(unittest.TestCase):
         )
 
     def test_explicit_damaged_selection_has_a_clear_error(self):
-        damaged = self.bad_candidate("partial", b"")
+        damaged = self.bad_candidate("broken", b"not SQLite")
         with patch.dict(os.environ, {"OUTLOOK_RAG_DATA_DIR": str(damaged)}):
             with self.assertRaisesRegex(
                 ValueError, "Cannot read cached index settings"
@@ -602,7 +602,7 @@ class OfflineCandidates(unittest.TestCase):
                 features.local_config()
 
     def test_explicit_dimensions_do_not_hide_damaged_selected_index(self):
-        damaged = self.bad_candidate("partial", b"")
+        damaged = self.bad_candidate("broken", b"not SQLite")
         with patch.dict(
             os.environ,
             {"OUTLOOK_RAG_DATA_DIR": str(damaged), "OUTLOOK_RAG_DIMENSIONS": "4"},
@@ -626,7 +626,7 @@ class OfflineCandidates(unittest.TestCase):
             )
 
     def test_no_usable_match_reports_damaged_candidates(self):
-        self.bad_candidate("partial", b"")
+        self.bad_candidate("broken", b"not SQLite")
         with (
             patch.dict(os.environ, {"OUTLOOK_RAG_MODEL": "missing"}),
             self.assertLogs(features.__name__, level="WARNING"),

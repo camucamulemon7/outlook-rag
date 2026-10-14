@@ -28,7 +28,7 @@ async def main():
     config_path = Path(sys.argv[1]).resolve()
     uv = sys.argv[2]
     server = StdioServerParameters(command=uv, args=["run", "--frozen", "--project", str(root),
-                                  "python", "-m", "outlook_rag.app", "--config", str(config_path)],
+                                  "python", "-m", "outlook_rag.entry", "--config", str(config_path)],
                                   env=server_environment(config_path))
     async with stdio_client(server) as (read, write):
         async with ClientSession(read, write) as session:

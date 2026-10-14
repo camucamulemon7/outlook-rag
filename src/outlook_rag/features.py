@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 import httpx
 from filelock import Timeout
 
-from . import coverage, outlook, paths, storage, threads, mail_metadata
+from . import coverage, outlook, paths, storage, threads, mail_metadata, readiness
 
 
 def local_config() -> dict:
@@ -38,6 +38,7 @@ def local_config() -> dict:
         candidates = [Path(cfg["data_dir"])]
     matches = []
     damaged = []
+    initializing = False
     def unreadable(folder: Path, exc: Exception) -> None:
         if not cfg.get("_automatic_data_dir"):
             raise ValueError(f"Cannot read cached index settings ({type(exc).__name__}); repair the selected data directory.") from exc
@@ -48,7 +49,11 @@ def local_config() -> dict:
         if path.is_file():
             try:
                 with closing(sqlite3.connect(path.resolve().as_uri()+"?mode=ro",uri=True,timeout=5)) as sql:
-                    row = sql.execute("SELECT value FROM state WHERE key='embedding_identity'").fetchone()
+                    has_state = sql.execute("SELECT 1 FROM sqlite_master WHERE name='state' AND type='table'").fetchone()
+                    row = sql.execute("SELECT value FROM state WHERE key='embedding_identity'").fetchone() if has_state else None
+                    if not row and not readiness.metadata_initialized(sql):
+                        initializing = True
+                        continue
                 saved_identities = [json.loads(row[0])] if row else []
             except (sqlite3.Error, OSError, ValueError, TypeError) as exc:
                 unreadable(folder, exc)
@@ -100,7 +105,7 @@ def local_config() -> dict:
                 return 0 if folder==named else 1 if folder==root/digest else 2 if folder.name==digest else 3
             matches.sort(key=preference)
         return matches[0]
-    if not cfg.get("_automatic_data_dir") and (Path(cfg["data_dir"])/"metadata.sqlite").is_file():
+    if not cfg.get("_automatic_data_dir") and (Path(cfg["data_dir"])/"metadata.sqlite").is_file() and not initializing:
         raise ValueError("Cached index settings do not match the configured model or chunk settings.")
     if damaged:
         raise ValueError("No usable cached index matches; unreadable candidates were found. Repair the index or select a valid OUTLOOK_RAG_DATA_DIR.")
@@ -117,6 +122,9 @@ def stored_sql(cfg: dict) -> Iterator[sqlite3.Connection | None]:
     sql.row_factory = sqlite3.Row
     try:
         try:
+            if not readiness.metadata_initialized(sql):
+                yield None
+                return
             identity = sql.execute("SELECT value FROM state WHERE key='embedding_identity'").fetchone()
             saved_identity = json.loads(identity[0]) if identity else None
         except (sqlite3.Error, ValueError, TypeError) as exc:
@@ -198,6 +206,7 @@ def retry(cfg: dict, mail_ids: list[str], max_seconds: float=30) -> dict:
             import win32com.client
             pythoncom.CoInitialize()
             sql = None
+            namespace = item = metadata = None
             try:
                 sql, table = app.open_store(cfg)
                 rows = {row['mail_id']:dict(row) for row in sql.execute('SELECT * FROM sync_failures WHERE mail_id IN ('+','.join('?' for _ in requested)+')',requested)}
@@ -233,9 +242,12 @@ def retry(cfg: dict, mail_ids: list[str], max_seconds: float=30) -> dict:
                                 sql.execute('DELETE FROM sync_failures WHERE mail_id IN (?,?)',(mid,mail['id']))
                             results.append(dict(mail_id=mid,indexed_mail_id=mail['id'],state='recovered'))
             finally:
-                if sql is not None:
-                    sql.close()
-                pythoncom.CoUninitialize()
+                metadata = item = namespace = None
+                try:
+                    if sql is not None:
+                        sql.close()
+                finally:
+                    pythoncom.CoUninitialize()
     except Timeout:
         return dict(state='busy',items=[],pending_mail_ids=requested,note='Another sync owns this index; no retry state was changed.')
     return dict(state='incomplete' if pending else 'completed_with_errors' if any(r['state']=='failed' for r in results) else 'completed',
@@ -346,6 +358,7 @@ def sources(backend: Any) -> dict:
     import pythoncom
     import win32com.client
     pythoncom.CoInitialize()
+    namespace = targets = None
     try:
         namespace = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
         cfg = backend.local_config()
@@ -353,17 +366,22 @@ def sources(backend: Any) -> dict:
         with backend.stored_sql(cfg) as sql:
             return coverage.live_coverage(report, targets, sql, cfg)
     finally:
+        targets = namespace = None
         pythoncom.CoUninitialize()
 
 
 def status(backend: Any) -> dict:
     cfg = backend.local_config()
-    if not cfg.get('dimensions'):
-        raise ValueError('Index not initialized. Run sync_index(action="start") with the embedding API available first.')
+    initial = readiness.inspect(cfg)
+    if initial['state'] != 'ready':
+        with stored_sql(cfg) as sql:
+            initial.update(model=cfg['model'], dimensions=cfg.get('dimensions'),
+                           search_coverage=coverage.index_coverage(sql, cfg), folder_progress=[], folders=[])
+        return initial
     sql, table = storage.open_index(cfg, writable=False)
     try:
         with backend.indexed_snapshot(sql, table, cfg) as table:
-            return {"folder_progress": backend.folder_progress(sql, dict(cfg, folders="auto")), "search_coverage": coverage.index_coverage(sql, cfg), "model": cfg["model"], "dimensions": cfg["dimensions"],
+            return {"state": "ready", "folder_progress": backend.folder_progress(sql, dict(cfg, folders="auto")), "search_coverage": coverage.index_coverage(sql, cfg), "model": cfg["model"], "dimensions": cfg["dimensions"],
                 "storage_dimensions": backend.vector_dimensions(cfg),
                 "text_cleaning_version": cfg["text_cleaning_version"],
                 "index_attachments": cfg.get("index_attachments", False),

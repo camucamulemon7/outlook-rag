@@ -11,9 +11,9 @@
   "sync_max_emails": 200,
   "sync_max_total_emails": 200,
   "since_days": 0,
-  "warmup_on_start": true,
   "embedding_concurrent_requests": 2,
   "storage_dimensions": 1024,
   "text_cleaning_version": 2,
-  "mcp_tool_profile": "standard"
+  "mcp_tool_profile": "standard",
+  "mcp_tool_timeout_seconds": 30
 }

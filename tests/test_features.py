@@ -84,7 +84,7 @@ class FunctionalFeatures(unittest.TestCase):
                 patch.object(app.threading, 'Thread') as warmup, patch.object(app.mcp, 'run') as run:
             app.main()
         run.assert_called_once_with(transport='stdio')
-        warmup.return_value.start.assert_called_once()
+        warmup.return_value.start.assert_not_called()
 
     def test_cli_status_reads_cached_index_when_provider_is_offline(self):
         self.add(0)
@@ -326,8 +326,7 @@ class ReadablePaths(unittest.TestCase):
                 with patch.dict(os.environ,{'OUTLOOK_RAG_MODEL':'no-existing-index','OUTLOOK_RAG_DIMENSIONS':'auto'}),patch.object(app,'detect_dimensions',side_effect=AssertionError('No probe')):
                     self.assertEqual(app.list_sync_failures()['items'],[])
                     self.assertEqual(app.get_sync_progress()['folders'],[])
-                    with self.assertRaisesRegex(ValueError, 'Index not initialized'):
-                        app.index_status()
+                    self.assertEqual(app.index_status()['state'], 'not_initialized')
                     with self.assertRaisesRegex(ValueError, 'Indexed mail not found'):
                         app.get_indexed_mail('0'*64)
 

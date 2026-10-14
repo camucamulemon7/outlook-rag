@@ -65,7 +65,7 @@ def validate_values(cfg: dict) -> None:
         except (ValueError, TypeError, OverflowError) as exc:
             raise ValueError(f"{name} must be an integer in {low}..{high}") from exc
         cfg[name] = number
-    for name, low, high in (("sync_max_seconds", 1, 3600), ("semantic_weight", 0, 10), ("lexical_weight", 0, 10)):
+    for name, low, high in (("sync_max_seconds", 1, 3600), ("mcp_tool_timeout_seconds", 1, 300), ("semantic_weight", 0, 10), ("lexical_weight", 0, 10)):
         if name in cfg:
             try:
                 if isinstance(cfg[name], bool):
@@ -103,7 +103,7 @@ def config(backend: Any, *, resolve_dimensions: bool = True) -> dict:
                   "folders": lambda value: "auto" if value.lower() == "auto" else json.loads(value),
                   "excluded_folders": json.loads, "exclude_system_folders": boolean,
                   "chunk_size": int, "chunk_overlap": int, "warmup_on_start": boolean,
-                  "sync_max_seconds": float, "sync_max_scanned": int, "sync_retry_limit": int,
+                  "sync_max_seconds": float, "mcp_tool_timeout_seconds": float, "sync_max_scanned": int, "sync_retry_limit": int,
                   "embedding_request_dimensions": int, "query_cache_size": int,
                   "search_candidates": int, "rrf_k": int, "semantic_weight": float, "lexical_weight": float,
                   "search_nprobes": int, "search_ef": int, "ann_num_partitions": int, "search_exact": boolean, "index_attachments": boolean}
