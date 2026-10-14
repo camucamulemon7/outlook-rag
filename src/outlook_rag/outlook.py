@@ -13,6 +13,28 @@ from typing import Any, Iterator
 import uuid
 
 
+def com_attr(item: Any, name: str) -> Any:
+    """Read a required COM property in at most six attempts on its owning thread.
+
+    Dynamic pywin32 dispatch can turn a failed GetIDsOfNames lookup into an
+    AttributeError. Never use safe_attr's empty default for persistent IDs.
+    """
+    errors: tuple[type[Exception], ...] = (AttributeError,)
+    try:
+        from pywintypes import com_error
+    except ImportError:
+        pass  # Keep offline metadata readers usable without Windows extensions.
+    else:
+        errors += (com_error,)
+    for _ in range(5):
+        try:
+            return getattr(item, name)
+        except errors:
+            time.sleep(0.2)
+    # The final attempt propagates the original exception and traceback.
+    return getattr(item, name)
+
+
 def safe_attr(item: Any, name: str, default: Any = "") -> Any:
     try:
         return getattr(item, name)
@@ -103,7 +125,7 @@ def resolve_folder(namespace: Any, name: str) -> Any:
 
 def folder_identity(folder: Any) -> str:
     return hashlib.sha256(
-        json.dumps([str(folder.StoreID), str(folder.EntryID)]).encode()
+        json.dumps([str(com_attr(folder, "StoreID")), str(com_attr(folder, "EntryID"))]).encode()
     ).hexdigest()
 
 
@@ -115,11 +137,11 @@ def discover_sources(namespace: Any, cfg: dict) -> tuple[dict, list]:
         if cfg.get("exclude_system_folders", True):
             for kind in (3, 20, 23):  # Deleted Items, Sync Issues and Junk Email.
                 try:
-                    excluded.add(str(store.GetDefaultFolder(kind).EntryID))
+                    excluded.add(str(com_attr(store.GetDefaultFolder(kind), "EntryID")))
                 except Exception:
                     pass
         try:
-            excluded.update(str(folder.EntryID) for folder in store.GetSearchFolders())
+            excluded.update(str(com_attr(folder, "EntryID")) for folder in store.GetSearchFolders())
         except Exception:
             pass
         file_path = str(safe_attr(store, "FilePath", ""))
@@ -133,12 +155,12 @@ def discover_sources(namespace: Any, cfg: dict) -> tuple[dict, list]:
         stores.append(store_info)
         try:
             root = store.GetRootFolder()
-            store_info["store_id"] = store_info["store_id"] or str(safe_attr(root, "StoreID", ""))
+            store_info["store_id"] = store_info["store_id"] or str(com_attr(root, "StoreID"))
             stack = [(root, name, 0)]
             visited = set()
             while stack:
                 folder, path, depth = stack.pop()
-                entry = str(folder.EntryID)
+                entry = str(com_attr(folder, "EntryID"))
                 if entry in visited:
                     continue
                 visited.add(entry)
