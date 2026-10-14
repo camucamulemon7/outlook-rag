@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, TYPE_CHECKING
 from weakref import WeakKeyDictionary
 from functools import wraps
 import threading
 import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+
+if TYPE_CHECKING:
+    from .tool_runtime import Pool
 
 MAIL_SEARCH_INSTRUCTIONS = (
     "For ordinary email lookup, content or meaning questions, use search_emails across ALL indexed Outlook stores, "
@@ -37,21 +40,19 @@ _OPTIONS: dict[str, dict] = {}
 _OUTLOOK_LOCK = threading.Lock()
 
 
-def configure_tools(mcp: FastMCP, adapters: dict[str, Callable[..., dict]], profile: str = "standard", *, isolated: bool = False, timeout: float = 30) -> None:
+def configure_tools(mcp: FastMCP, adapters: dict[str, Callable[..., dict]], profile: str = "standard", *, runtime: Pool | None = None, timeout: float = 30) -> None:
     """Select the public surface without removing shared CLI operations."""
     if profile not in {"standard", "full"}:
         raise ValueError("mcp_tool_profile must be 'standard' or 'full'")
     names = set(adapters) if profile == "full" else STANDARD_TOOLS
-    limiter = anyio.CapacityLimiter(4)
     for name in sorted(_REGISTERED.get(mcp, set())):
         mcp.remove_tool(name)
     for name in sorted(names):
         function = adapters[name]
         @wraps(function)
         async def dispatch(*args: Any, _function: Callable = function, **kwargs: Any) -> dict:
-            if isolated:
-                from . import tool_runtime
-                return await tool_runtime.call(_function.__name__, kwargs, timeout, limiter)
+            if runtime is not None:
+                return await runtime.call(_function.__name__, kwargs, timeout)
             def execute() -> dict:
                 outlook = _function.__name__ in {"list_outlook_sources", "sync_emails", "retry_failed_emails", "start_sync_job"} or (_function.__name__ == "sync_index" and kwargs.get("action", "status") == "start")
                 if outlook:

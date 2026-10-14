@@ -65,7 +65,7 @@ class StdioResilience(unittest.TestCase):
                 for query in ("print", "exit", "native-output", "system-exit", "com-error", "attribute-error", "hang"):
                     started = time.perf_counter()
                     result = await session.call_tool("search_emails", {"query": query})
-                    self.assertEqual(result.isError, query != "print", result)
+                    self.assertEqual(result.isError, query not in {"print", "native-output"}, result)
                     self.assertNotIn("private secret", str(result))
                     self.assertLess(time.perf_counter() - started, 6)
                     await session.send_ping()
@@ -163,4 +163,24 @@ class StdioResilience(unittest.TestCase):
                     await asyncio.sleep(.02)
                 self.assertFalse(psutil.pid_exists(pid))
                 self.assertLess(time.perf_counter() - started, 8)
+        asyncio.run(exercise())
+
+    def test_repeated_cancellation_during_helper_startup_leaves_no_children(self):
+        from outlook_rag.tool_runtime import Pool
+        async def exercise():
+            before = {process.pid for process in psutil.Process().children()}
+            runtime = Pool([sys.executable, '-c', 'import time; time.sleep(60)'])
+            try:
+                for _ in range(20):
+                    with anyio.move_on_after(.02):
+                        await runtime.call('index_status', {}, 30)
+                    self.assertEqual(len(runtime.helpers), 0)
+                remaining = {process.pid for process in psutil.Process().children()} - before
+                self.assertEqual(remaining, set())
+            finally:
+                await runtime.aclose()
+                for process in psutil.Process().children():
+                    if process.pid not in before:
+                        process.kill()
+                        process.wait(timeout=3)
         asyncio.run(exercise())

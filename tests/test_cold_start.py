@@ -75,3 +75,20 @@ class ColdIndex(unittest.TestCase):
             sql.execute("INSERT INTO emails VALUES('a')")
         with self.assertRaises(ValueError):
             features.local_config()
+
+    def test_failed_vector_initialization_closes_sqlite_and_remains_inspectable(self):
+        created = []
+        connect = sqlite3.connect
+        def record(*args, **kwargs):
+            connection = connect(*args, **kwargs)
+            created.append(connection)
+            return connection
+        cfg = dict(app.config(resolve_dimensions=False), dimensions=4)
+        with patch('outlook_rag.database.sqlite3.connect', side_effect=record), patch.object(
+                app.lancedb, 'connect', side_effect=RuntimeError('Synthetic native initialization failure')):
+            with self.assertRaises(RuntimeError):
+                app.open_store(cfg)
+        self.assertEqual(len(created), 1)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            created[0].execute('SELECT 1')
+        self.assert_unready('initializing')

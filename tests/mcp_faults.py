@@ -17,6 +17,16 @@ def execute(name, arguments, timeout):
         os._exit(7)
     if query == "native-output":
         os.write(1, b"native output is not an MCP message\n")
+        if os.name == 'nt':
+            import ctypes
+            from ctypes import wintypes
+            kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+            kernel.GetStdHandle.argtypes = [wintypes.DWORD]
+            kernel.GetStdHandle.restype = wintypes.HANDLE
+            kernel.WriteFile.argtypes = [wintypes.HANDLE, wintypes.LPCVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+            written = wintypes.DWORD()
+            data = b'Windows native output\n'
+            kernel.WriteFile(kernel.GetStdHandle(-11 & 0xffffffff), data, len(data), ctypes.byref(written), None)
     if query == "print":
         print("This output must never reach MCP stdio", flush=True)
     if query in {"system-exit", "com-error", "attribute-error"}:

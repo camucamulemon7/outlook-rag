@@ -21,8 +21,9 @@ store needs repair. Reading an index never creates a database. Status of a job
 that has never started also leaves the data directory untouched.
 
 Each synchronous MCP operation runs in a reusable helper process. At most four
-helpers execute concurrently. Python output is separated from MCP stdout, and
-native crashes or unexpected worker output become tool errors. COM stays on the
+helpers execute concurrently. Native crashes become tool errors. Helpers use a
+private JSON channel; Python output, CRT and native Windows standard handles
+are redirected away from that channel. COM stays on the
 helper's calling thread; database handles and COM proxies never cross the process
 boundary. Existing six-attempt COM property retries are retained.
 
@@ -33,6 +34,10 @@ status and subsequent tools. Cancellation and stdio EOF also terminate active
 helpers. MCP SDK 1.30+ is required for EOF cancellation. Configuration errors are
 returned by tools, allowing an edited config file to be used in the same session;
 changing the tool profile or deadline requires a server restart.
+
+Ownership is tracked immediately after OS spawn, before any cancellable startup
+read or write. A 20-call startup cancellation regression verifies that no helpers
+remain. Cleanup covers initialization as well as running operations.
 
 Use `sync_index(action="start")` for bulk indexing. Foreground sync in the full
 profile receives a shorter cooperative budget before the hard deadline. Long
@@ -56,7 +61,7 @@ uv run --frozen --offline python tests/benchmark_mcp.py --baseline-root /path/to
 The stdio tests use real MCP clients and helper processes. They exercise no DB,
 partial initialization, unavailable API/no key, invalid config repaired in the
 same session, SystemExit, COM/AttributeError, native exit, Python/native stdout,
-blocked calls, cancellation, four-helper saturation, concurrent status, and EOF
+blocked calls, startup/running cancellation, four-helper saturation, concurrent status, and EOF
 during a blocked call. PID checks verify helper cleanup. Windows CI uses real
 pywin32 for its COM error type and dynamic property lookup regression; it does
 not have a real Outlook mailbox or OpenCode Desktop session.
@@ -67,10 +72,10 @@ million-message scalability or general retrieval accuracy.
 
 | Measurement | v0.9.2 | Isolated MCP |
 | --- | ---: | ---: |
-| Handshake | 550.2 ms | 173.9 ms |
-| First search after handshake | 22.4 ms | 534.6 ms |
-| Warm search P50 (30 calls) | 2.6 ms | 3.4 ms |
-| Warm search P95 (30 calls) | 3.0 ms | 4.2 ms |
+| Handshake | 574.5 ms | 184.3 ms |
+| First search after handshake | 23.7 ms | 607.8 ms |
+| Warm search P50 (30 calls) | 2.8 ms | 3.6 ms |
+| Warm search P95 (30 calls) | 3.1 ms | 4.0 ms |
 
 Top-10 mail IDs were identical. First-use cost moves from transport startup to
 the first helper operation; warm median overhead in this run was 0.8 ms. Actual

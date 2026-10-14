@@ -9,8 +9,12 @@
   terminate blocked helpers while preserving the MCP connection for other calls.
 - Contain COM errors, SystemExit, native process exits and accidental stdout;
   return sanitized diagnostics without serializing COM objects/exceptions.
+- Own helper processes from OS spawn through reaping, including cancellation
+  before initialization; use a private JSON channel and redirect native handles.
 - Release read-ahead COM references before CoUninitialize. Read-only job status
   no longer creates a data directory on first use.
+- Close SQLite explicitly if schema/vector initialization fails, preserving a
+  retryable initial state without leaking the database handle.
 - Require MCP SDK 1.30+ for cancellation of in-flight handlers on transport EOF.
   Existing CLI commands and the six standard MCP tool names remain available.
 

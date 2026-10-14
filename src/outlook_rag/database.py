@@ -74,6 +74,15 @@ def open_store(backend: Any, cfg: dict) -> tuple[sqlite3.Connection, Any]:
     root = Path(cfg["data_dir"])
     root.mkdir(parents=True, exist_ok=True)
     sql = sqlite3.connect(root / "metadata.sqlite", timeout=30)
+    try:
+        table = _initialize_store(backend, cfg, sql, root)
+    except BaseException:
+        sql.close()
+        raise
+    return sql, table
+
+
+def _initialize_store(backend: Any, cfg: dict, sql: sqlite3.Connection, root: Path) -> Any:
     sql.row_factory = sqlite3.Row
     sql.execute("PRAGMA journal_mode=WAL")
     sql.executescript("""
@@ -119,7 +128,6 @@ def open_store(backend: Any, cfg: dict) -> tuple[sqlite3.Connection, Any]:
     identity = backend.index_identity(cfg)
     previous = sql.execute("SELECT value FROM state WHERE key='embedding_identity'").fetchone()
     if previous and previous[0] != identity:
-        sql.close()
         raise ValueError("Index configuration changed. Use a new data_dir and re-index.")
     sql.execute("INSERT OR IGNORE INTO state VALUES ('embedding_identity', ?)", (identity,))
     sql.commit()
@@ -139,5 +147,5 @@ def open_store(backend: Any, cfg: dict) -> tuple[sqlite3.Connection, Any]:
         with sql:
             sql.execute("INSERT OR IGNORE INTO state VALUES ('vector_version', ?)", (str(table.version),))
         backend.pin_vectors(sql, table)
-    return sql, table
+    return table
 

@@ -32,16 +32,23 @@ def transport_options() -> tuple[str, float]:
 
 
 def serve(mcp: Any = None, adapters: dict | None = None) -> None:
+    import anyio
     from mcp.server.fastmcp import FastMCP
-    from outlook_rag import server
+    from outlook_rag import server, tool_runtime
 
     if mcp is None:
         mcp = FastMCP("outlook-rag", instructions=server.MAIL_SEARCH_INSTRUCTIONS)
         adapters = server.register_tools(mcp, None)
     profile, timeout = transport_options()
     assert adapters is not None
-    server.configure_tools(mcp, adapters, profile, isolated=True, timeout=timeout)
-    mcp.run(transport="stdio")
+    runtime = tool_runtime.Pool()
+    server.configure_tools(mcp, adapters, profile, runtime=runtime, timeout=timeout)
+    async def run() -> None:
+        try:
+            await mcp.run_stdio_async()
+        finally:
+            await runtime.aclose()
+    anyio.run(run)
 
 
 def main() -> None:
