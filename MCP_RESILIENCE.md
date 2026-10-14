@@ -44,7 +44,7 @@ therefore also terminates helpers and parser descendants. Registering in the
 interpreter avoids a race when a virtualenv launcher starts a child before job
 assignment. POSIX helper timeouts/cancellation terminate the process group.
 
-Use `sync_index(action="start")` for bulk indexing. Foreground sync in the full
+Use `sync_index(action="plan")` before bulk indexing, then `sync_index(action="start", since_days=<approved>, confirmed=true)` for the approved scope. Planning does not call the embedding API or create an index. Foreground sync in the full
 profile receives a shorter cooperative budget before the hard deadline. Long
 optimization/maintenance operations can use the CLI or an increased deadline.
 A forcibly stopped write retains committed data; check job/index status before

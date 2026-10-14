@@ -1,5 +1,8 @@
 # 0.9.4
 
+- Preview initial sync periods (30/90/365 days/all time), metadata counts and estimated duration before asking the user to choose. MCP bulk start requires an approved explicit period; an explicit all/everything request remains supported without a second question.
+- Estimate remaining scan time from same-index measured throughput, with a qualified initial range when unmeasured; keep unknown counts unknown and scope progress to the selected period.
+
 - Reap Windows MCP helpers and parser descendants after abrupt transport death,
   using parent-owned Job Objects registered by the actual interpreter.
 - Supervise detached native sync workers separately. Bound stalled cycles and

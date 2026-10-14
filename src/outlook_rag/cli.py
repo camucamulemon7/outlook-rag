@@ -190,8 +190,9 @@ def main(backend: Any) -> None:
         )
     elif args.command == "job":
         if args.action == "start":
+            days = args.since_days if args.since_days is not None else backend.config().get("since_days", 0)
             result = backend.start_sync_job(
-                args.folders, args.since_days, args.reconcile
+                args.folders, 0 if days == "all" else days, args.reconcile, True
             )
         elif args.action == "status":
             result = backend.sync_job_status(args.job_id)

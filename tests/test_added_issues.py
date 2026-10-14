@@ -507,7 +507,7 @@ class AddedIssues(unittest.TestCase):
                     "--reconcile",
                 ],
                 "start_sync_job",
-                (["inbox", "sent"], 7, True),
+                (["inbox", "sent"], 7, True, True),
             ),
             (
                 ["failures", "retry", "a" * 64, "b" * 64, "--max-seconds", "12"],

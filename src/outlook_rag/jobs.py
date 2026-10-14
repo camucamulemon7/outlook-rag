@@ -208,7 +208,7 @@ def status(cfg: dict, job_id: str | None=None) -> dict:
         "recent_logs": diagnostics.recent(cfg, record["job_id"])}
 
 
-def start(cfg: dict, folders: list[str] | None=None, since_days: int | None=None, reconcile: bool=False) -> dict:
+def start(cfg: dict, folders: list[str] | None=None, since_days: int | None=None, reconcile: bool=False, *, preflight: dict | None=None) -> dict:
     from .coverage import folder_selection
     if folders is not None and (not isinstance(folders, list) or not all(isinstance(f, str) for f in folders)):
         raise ValueError("folders must be a list of paths")
@@ -233,6 +233,8 @@ def start(cfg: dict, folders: list[str] | None=None, since_days: int | None=None
                       options=dict(folders=folders, since_days=since_days, reconcile=reconcile),
                       cycles=0, indexed_total=0, scanned_total=0, retried_total=0,
                       known=[], complete=[], known_folders=0, completed_folders=0)
+        if preflight is not None:
+            record["preflight"] = preflight
         record["log_path"] = str(diagnostics.log_path(cfg, job_id).resolve())
         write(path, record)
         diagnostics.append(cfg, job_id, "launch_requested")

@@ -214,6 +214,18 @@ class FunctionalFeatures(unittest.TestCase):
         self.assertIsNone(result['remaining_items_estimate'])
         self.assertIsNone(result['eta_seconds_estimate'])
 
+    def test_job_progress_uses_its_period_and_preflight_total(self):
+        for days, scanned in [(0, 900), (30, 100)]:
+            value = dict(folder='inbox', since_days=days, complete=False, progress_known=True,
+                         processed_rows=scanned, processing_seconds=20, source_items_estimate=None)
+            with self.sql:
+                self.sql.execute('INSERT OR REPLACE INTO state VALUES (?,?)', ('sync:scope:' + str(days), json.dumps(value)))
+        scoped = dict(self.cfg, _progress_since_days=30, _progress_totals={'inbox': 500})
+        result = features.folder_progress(self.sql, scoped)[0]
+        self.assertEqual(result['processed_items'], 100)
+        self.assertEqual(result['remaining_items_estimate'], 400)
+        self.assertEqual(result['since_days'], 30)
+
     def test_thread_context_is_ordered_bounded_and_store_scoped(self):
         ids=[self.add(i,body='body '+str(i)) for i in range(5)]
         self.add(2,store='other')

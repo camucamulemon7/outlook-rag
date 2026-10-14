@@ -184,7 +184,7 @@ def discover_sources(namespace: Any, cfg: dict) -> tuple[dict, list]:
                         for pattern in cfg.get("excluded_folders", [])
                     )
                 )
-                item_count = safe_attr(safe_attr(folder, "Items", None), "Count", 0)
+                item_count = safe_attr(safe_attr(folder, "Items", None), "Count", None)
                 mail_folder = safe_attr(folder, "DefaultItemType", -1) == 0
                 store_info["folders"].append(
                     {

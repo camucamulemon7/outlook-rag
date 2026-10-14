@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 from mcp.server.fastmcp import FastMCP
 
-from outlook_rag import app, features, jobs, paths, server
+from outlook_rag import app, features, jobs, paths, server, sync_planning
 from outlook_test_support import synthetic_com
 
 
@@ -30,7 +30,7 @@ class ToolProfiles(unittest.TestCase):
         tools = self.names()
         self.assertEqual(set(tools), server.STANDARD_TOOLS)
         self.assertEqual(len(tools), 6)
-        self.assertEqual(tools["sync_index"].inputSchema["properties"]["action"]["enum"], ["start", "status", "cancel"])
+        self.assertEqual(tools["sync_index"].inputSchema["properties"]["action"]["enum"], ["plan", "start", "status", "cancel"])
         self.assertFalse(tools["sync_index"].annotations.readOnlyHint)
         self.assertTrue(tools["get_indexed_mail"].annotations.readOnlyHint)
         server.configure_tools(self.mcp, self.adapters, "full")
@@ -44,10 +44,11 @@ class ToolProfiles(unittest.TestCase):
         self.assertEqual(set(self.names()), server.STANDARD_TOOLS)
 
     def test_sync_routes_and_offline_controls(self):
-        with patch.object(jobs, "start", return_value={"job_id": "fixture"}) as start:
-            result = self.adapters["sync_index"]("start", folders=["auto"], since_days=0)
+        with (patch.object(jobs, "start", return_value={"job_id": "fixture"}) as start,
+              patch.object(sync_planning, "plan", return_value={"previews": [{}]})):
+            result = self.adapters["sync_index"]("start", folders=["auto"], since_days=0, confirmed=True)
             self.assertEqual(result["job_id"], "fixture")
-            start.assert_called_once_with(self.backend.config.return_value, ["auto"], 0, False)
+            start.assert_called_once_with(self.backend.config.return_value, ["auto"], 0, False, preflight={})
         self.backend.config.reset_mock()
         with (patch.object(features, "local_config", return_value={"data_dir": "fixture"}),
               patch.object(features, "progress", return_value={"folders": [{"folder": "PST"}]}),

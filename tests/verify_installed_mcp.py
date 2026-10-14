@@ -55,7 +55,7 @@ async def verify(command):
                     config.write_text(json.dumps(cfg), encoding='utf-8')
                     assert not (await session.call_tool('index_status', {})).isError
                     calls += 1
-                    assert (await session.call_tool('sync_index', {'action': 'start'})).isError
+                    assert (await session.call_tool('sync_index', {'action': 'start', 'since_days': 0, 'confirmed': True})).isError
                     calls += 1
                     await session.send_ping()
                     assert not (await session.call_tool('index_status', {})).isError

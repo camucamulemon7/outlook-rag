@@ -230,7 +230,7 @@ def real_outlook_case():
                     hits = payload(await session.call_tool("search_emails", {"query": "", "mode": "metadata"}))
                     assert hits["count"] == count
                     # Real WMI + authenticated named-pipe launch.
-                    job = payload(await session.call_tool("sync_index", {"action": "start", "folders": ["inbox"]}))
+                    job = payload(await session.call_tool("sync_index", {"action": "start", "folders": ["inbox"], "since_days": 0, "confirmed": True}))
                     job_id = job["job_id"]
                     for _ in range(100):
                         job = payload(await session.call_tool("sync_index", {"action": "status", "job_id": job_id}))
@@ -240,7 +240,7 @@ def real_outlook_case():
                     assert job["state"] == "completed", "Real WMI worker did not finish"
                     await session.send_ping()
                     Handler.pause = True
-                    job = payload(await session.call_tool("sync_index", {"action": "start", "folders": [path]}))
+                    job = payload(await session.call_tool("sync_index", {"action": "start", "folders": [path], "since_days": 0, "confirmed": True}))
                     job_id = job["job_id"]
                     for _ in range(120):
                         job = payload(await session.call_tool("sync_index", {"action": "status", "job_id": job_id}))
