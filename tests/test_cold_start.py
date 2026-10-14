@@ -1,5 +1,6 @@
 """First-use and partially initialized indexes must remain safe to inspect."""
 import json
+from contextlib import closing
 import os
 from pathlib import Path
 import sqlite3
@@ -46,7 +47,7 @@ class ColdIndex(unittest.TestCase):
 
     def test_schema_creation_window_is_not_a_corrupt_index(self):
         self.index.mkdir()
-        with sqlite3.connect(self.index / "metadata.sqlite"):
+        with closing(sqlite3.connect(self.index / "metadata.sqlite")):
             pass
         self.assert_unready("initializing")
         self.assertEqual(app.get_sync_progress()["folders"], [])
@@ -55,7 +56,7 @@ class ColdIndex(unittest.TestCase):
         self.index.mkdir()
         cfg = app.config(resolve_dimensions=False)
         identity = app.index_identity(dict(cfg, dimensions=4))
-        with sqlite3.connect(self.index / "metadata.sqlite") as sql:
+        with closing(sqlite3.connect(self.index / "metadata.sqlite")) as sql, sql:
             sql.execute("CREATE TABLE state(key TEXT PRIMARY KEY,value TEXT)")
             sql.execute("CREATE TABLE emails(id TEXT)")
             sql.execute("INSERT INTO state VALUES('embedding_identity',?)", (identity,))
@@ -69,7 +70,7 @@ class ColdIndex(unittest.TestCase):
 
     def test_populated_metadata_without_identity_needs_repair(self):
         self.index.mkdir()
-        with sqlite3.connect(self.index / "metadata.sqlite") as sql:
+        with closing(sqlite3.connect(self.index / "metadata.sqlite")) as sql, sql:
             sql.execute("CREATE TABLE emails(id TEXT)")
             sql.execute("INSERT INTO emails VALUES('a')")
         with self.assertRaises(ValueError):

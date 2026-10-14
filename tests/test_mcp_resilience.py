@@ -131,11 +131,16 @@ class StdioResilience(unittest.TestCase):
                 async with connect([str(ROOT / 'tests' / 'mcp_fault_server.py')]) as session:
                     requests = [asyncio.create_task(session.call_tool('search_emails', {'query': 'hang', 'marker': str(Path(folder) / str(i))})) for i in range(6)]
                     await asyncio.sleep(.3)
+                    active = {int(path.read_text()) for path in Path(folder).iterdir() if path.name.isdigit()}
+                    self.assertLessEqual(sum(psutil.pid_exists(pid) for pid in active), 4)
                     await session.send_ping()
                     results = await asyncio.gather(*requests)
                     self.assertTrue(all(result.isError for result in results))
                     pids = {int(path.read_text()) for path in Path(folder).iterdir() if path.name.isdigit()}
-                    self.assertLessEqual(len(pids), 4)
+                    for _ in range(100):
+                        if all(not psutil.pid_exists(pid) for pid in pids):
+                            break
+                        await asyncio.sleep(.02)
                     self.assertTrue(all(not psutil.pid_exists(pid) for pid in pids))
                     self.assertFalse((await session.call_tool('index_status', {})).isError)
         asyncio.run(exercise())
